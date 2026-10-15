@@ -1,11 +1,10 @@
 __pycache__/
-*.pyc
+*.py[cod]
 .env
-.streamlit/secrets.toml
-ai_cache/
-epd_library.sqlite3
+.env.*
+!.env.example
 *.sqlite3
-*.sqlite3-*
+ai_cache/
+.streamlit/
+venv/
 .venv/
-build/
-dist/

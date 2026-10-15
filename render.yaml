@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: epd-data-extractor
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt && (command -v tesseract >/dev/null || echo 'WARNING: Tesseract OCR unavailable on this host')
+    startCommand: gunicorn web_app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 300
+    healthCheckPath: /health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: FLASK_SECRET_KEY
+        generateValue: true
+      - key: EPD_GEMINI_MODEL
+        value: gemini-flash-latest
