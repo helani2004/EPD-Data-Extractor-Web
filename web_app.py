@@ -50,10 +50,10 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 {% if records %}<section class="panel"><div class="topline"><h2>2. Review extracted results ({{ records|length }} records)</h2><a class="btn" href="{{ url_for('download') }}">⬇ Download Excel (all records)</a></div>
 <form method="get" action="{{ url_for('index') }}" class="actions"><label for="record">Select record</label><select name="record" id="record" onchange="this.form.submit()">{% for r in records %}<option value="{{ loop.index0 }}" {{ 'selected' if loop.index0 == selected else '' }}>{{ loop.index }}. {{ r['result'].get('file','EPD') }}</option>{% endfor %}</select><noscript><button type="submit">Open</button></noscript></form>
 {% if record %}<p class="status">Edit any field and click <strong>Save edits</strong> before downloading. Blank fields mean unavailable or not recovered.</p>
-<form method="post" action="{{ url_for('edit',index=selected) }}"><div class="scroll"><table><thead><tr><th>Excel field</th><th>Extracted value (editable)</th></tr></thead><tbody>
+<form method="post" action="{{ url_for('edit',record_id=record['id']) }}"><div class="scroll"><table><thead><tr><th>Excel field</th><th>Extracted value (editable)</th></tr></thead><tbody>
 {% for key,value in record['result']['data'].items() %}<tr><td>{{ key.replace('__',' | ') }}</td><td><input type="text" name="f_{{ loop.index0 }}" value="{{ value if value is not none else '' }}" autocomplete="off"></td></tr>{% endfor %}
 </tbody></table></div><div class="actions"><button type="submit">Save edits</button><a class="btn secondary" href="{{ url_for('download') }}">Download Excel</a></div></form>
-<form method="post" action="{{ url_for('remove',index=selected) }}" class="actions"><button class="danger" type="submit" onclick="return confirm('Remove this record?')">Remove selected record</button></form>
+<form method="post" action="{{ url_for('remove',record_id=record['id']) }}" class="actions"><button class="danger" type="submit" onclick="return confirm('Remove this record?')">Remove selected record</button></form>
 <details><summary>Extraction warnings ({{ record['result'].get('warnings',[])|length }})</summary>{% for w in record['result'].get('warnings',[]) %}<div class="warning">{{ w }}</div>{% endfor %}</details>
 <details><summary>Source evidence ({{ record['result'].get('evidence',[])|length }})</summary><div class="scroll"><table><tr><th>Field</th><th>Value</th><th>Page</th><th>Source text</th></tr>{% for e in record['result'].get('evidence',[]) %}<tr><td>{{ e.get('field','') }}</td><td>{{ e.get('value','') }}</td><td>{{ e.get('page','') }}</td><td>{{ e.get('raw','') }}</td></tr>{% endfor %}</table></div></details>
 <details><summary>Gemini AI review ({{ record['result'].get('ai_review',[])|length }})</summary><div class="scroll"><table><tr><th>Field</th><th>AI proposal</th><th>Decision</th><th>Page</th></tr>{% for e in record['result'].get('ai_review',[]) %}<tr><td>{{ e.get('field','') }}</td><td>{{ e.get('proposed','') }}</td><td>{{ e.get('decision','') }}</td><td>{{ e.get('page','') }}</td></tr>{% endfor %}</table></div></details>
@@ -81,7 +81,6 @@ def index():
 
 @app.post('/upload')
 def upload():
-    records = user_records()
     uploads = [f for f in request.files.getlist('pdfs') if f.filename]
     if not uploads:
         flash('Please select at least one PDF.', 'error')
@@ -117,19 +116,26 @@ def upload():
                     except Exception as exc:
                         result.setdefault('warnings', []).insert(0, 'AI PASS FAILED: ' + str(exc))
                         result['ai_failed'] = True
-                records.append({'id': len(records)+1, 'created': datetime.now().isoformat(timespec='seconds'), 'result': result})
+                                insert_record({
+                    'id': uuid.uuid4().hex,
+                    'created': datetime.now().isoformat(
+                        timespec='microseconds'
+                    ),
+                    'result': result,
+                })
                 flash(f'Processed {name}.' + (' Gemini failed; Python results retained.' if result.get('ai_failed') else ''))
             except Exception as exc:
                 flash(f'Extraction failed for {name}: {exc}', 'error')
     return redirect(url_for('index'))
 
 
-@app.post('/edit/<int:index>')
-def edit(index):
-    records = user_records()
-    if not 0 <= index < len(records):
+@app.post('/edit/<record_id>')
+def edit(record_id):
+    record = get_record(record_id)
+    if record is None:
         abort(404)
-    result = records[index]['result']
+
+    result = record['result']
     for i, key in enumerate(result['data']):
         val = request.form.get(f'f_{i}', '').strip()
         if val and (key.startswith('__') or key in {HEADERS[j] for j in (15,17,19,21,40,41,42,43,110)}):
@@ -144,17 +150,19 @@ def edit(index):
                 'raw': str(val), 'method': 'manual web review edit', 'status': 'user supplied'})
             result['data'][key] = val
     result['reviewed'] = True
-    flash('Edits saved. You can now download Excel.')
-    return redirect(url_for('index', record=index))
+    update_record(record_id, result)
+    flash('Record saved to the database.')
+    return redirect(url_for('index'))
 
 
-@app.post('/remove/<int:index>')
-def remove(index):
-    records = user_records()
-    if not 0 <= index < len(records):
+@app.post('/remove/<record_id>')
+def remove(record_id):
+    record = get_record(record_id)
+    if record is None:
         abort(404)
-    records.pop(index)
-    flash('Record removed.')
+
+    delete_record(record_id)
+    flash('Record removed from the database.')
     return redirect(url_for('index'))
 
 
