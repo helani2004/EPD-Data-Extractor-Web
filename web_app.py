@@ -180,39 +180,141 @@ def upload():
                 flash(f'Extraction failed for {name}: {exc}', 'error')
     return redirect(url_for('index'))
 
+@app.post('/upload')
+def upload():
+    category = request.form.get('material_category', '')
+
+    if category not in CATEGORIES:
+        flash('Please select a valid material category.', 'error')
+        return redirect(url_for('index'))
+
+    uploads = [
+        f for f in request.files.getlist('pdfs')
+        if f.filename
+    ]
+
+    if not uploads:
+        flash('Please select at least one PDF.', 'error')
+        return redirect(url_for('index'))
+
+    if len(uploads) > 5:
+        flash('Please upload no more than 5 PDFs at a time.', 'error')
+        return redirect(url_for('index'))
+
+    use_ai = bool(API_KEY and request.form.get('use_ai') == '1')
+
+    for upload_file in uploads:
+        name = Path(upload_file.filename).name
+
+        if not name.lower().endswith('.pdf'):
+            flash(f'Skipped {name}: PDF files only.', 'error')
+            continue
+
+        with tempfile.TemporaryDirectory(prefix='epd_render_') as directory:
+            path = Path(directory) / 'input.pdf'
+            content = upload_file.read()
+
+            if not content.startswith(b'%PDF-'):
+                flash(f'Skipped {name}: file is not a valid PDF.', 'error')
+                continue
+
+            if len(content) > 15 * 1024 * 1024:
+                flash(f'Skipped {name}: maximum file size is 15 MB.', 'error')
+                continue
+
+            path.write_bytes(content)
+
+            try:
+                result = process(path)
+                result['file'] = name
+
+                for item in result.get('values', []):
+                    item['file'] = name
+
+                if use_ai:
+                    try:
+                        result = review_pdf(
+                            path,
+                            result,
+                            HEADERS,
+                            GROUPS,
+                            IMPACT_FIELDS,
+                            API_KEY,
+                            MODEL,
+                            Path(directory) / 'ai_cache',
+                        )
+                    except Exception as exc:
+                        result.setdefault('warnings', []).insert(
+                            0, 'AI PASS FAILED: ' + str(exc)
+                        )
+                        result['ai_failed'] = True
+
+                result['data']['Material Category'] = category
+
+                insert_record({
+                    'id': uuid.uuid4().hex,
+                    'created': datetime.now().isoformat(
+                        timespec='microseconds'
+                    ),
+                    'result': result,
+                })
+
+                message = f'Processed and saved {name}.'
+                if result.get('ai_failed'):
+                    message += ' Gemini failed; Python results retained.'
+                flash(message)
+
+            except Exception as exc:
+                flash(f'Extraction or saving failed for {name}: {exc}', 'error')
+
+    return redirect(url_for('index'))
+
 
 @app.post('/edit/<record_id>')
 def edit(record_id):
     record = get_record(record_id)
+
     if record is None:
         abort(404)
 
     result = record['result']
-       category_index = list(result['data']).index('Material Category')
-    selected_category = request.form.get(
-        f'f_{category_index}', ''
-    )
+    category_index = list(result['data']).index('Material Category')
+    selected_category = request.form.get(f'f_{category_index}', '')
 
     if selected_category not in CATEGORIES:
         flash(
-            'Please select a valid material category. '
-            'No changes were saved.',
+            'Please select a valid material category. No changes were saved.',
             'error',
         )
         return redirect(url_for('index'))
+
+    numeric_fields = {
+        HEADERS[j]
+        for j in (15, 17, 19, 21, 40, 41, 42, 43, 110)
+    }
+
     for i, key in enumerate(result['data']):
         val = request.form.get(f'f_{i}', '').strip()
-        if val and (key.startswith('__') or key in {HEADERS[j] for j in (15,17,19,21,40,41,42,43,110)}):
+
+        if val and (key.startswith('__') or key in numeric_fields):
             try:
-                num = float(val)
-                if math.isfinite(num):
-                    val = num
+                number = float(val)
+                if math.isfinite(number):
+                    val = number
             except ValueError:
-                pass  # Preserve user-entered text for review.
+                pass
+
         if val != result['data'][key]:
-            result.setdefault('evidence', []).append({'field': key, 'value': val, 'page': None,
-                'raw': str(val), 'method': 'manual web review edit', 'status': 'user supplied'})
+            result.setdefault('evidence', []).append({
+                'field': key,
+                'value': val,
+                'page': None,
+                'raw': str(val),
+                'method': 'manual web review edit',
+                'status': 'user supplied',
+            })
             result['data'][key] = val
+
     result['reviewed'] = True
     update_record(record_id, result)
     flash('Record saved to the database.')
