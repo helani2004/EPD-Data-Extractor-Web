@@ -14,6 +14,16 @@ from flask import Flask, request, redirect, url_for, session, render_template_st
 from werkzeug.exceptions import RequestEntityTooLarge
 from extractor_core import process, save_excel, HEADERS, GROUPS, IMPACT_FIELDS
 from ai_review import review_pdf
+from category_export import save_category_excel
+from material_categories import CATEGORIES
+from database import (
+    list_records,
+    get_record,
+    insert_record,
+    update_record,
+    delete_record,
+    DatabaseError,
+)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY') or os.urandom(32)
@@ -23,10 +33,7 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = os.environ.get('RENDER', '').lower() == 'true'
 API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
 MODEL = os.environ.get('EPD_GEMINI_MODEL', 'gemini-flash-latest').strip()
-# Records are isolated per browser, held in RAM, and expire after inactivity.
-STORE = {}
-LOCK = threading.RLock()
-TTL = 2 * 60 * 60
+
 
 PAGE = '''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>EPD Data Extractor</title><style>
@@ -38,37 +45,69 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 {% for kind,message in get_flashed_messages(with_categories=true) %}<div class="notice {{ 'error' if kind=='error' else '' }}">{{ message }}</div>{% endfor %}
 <section class="panel"><div class="topline"><h2>1. Upload EPD PDFs</h2><span class="badge">Gemini: {{ 'Configured' if ai_ready else 'Not configured' }}</span></div>
 <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
-<label for="pdfs">Choose one or more PDF files</label><input id="pdfs" type="file" name="pdfs" accept=".pdf,application/pdf" multiple required>
+<label for="category">Material Category (required)</label>
+<select id="category" name="material_category" required>
+    <option value="">Select a material category</option>
+    {% for category in categories %}
+    <option value="{{ category }}">{{ category }}</option>
+    {% endfor %}
+</select>
+
+<p class="status">
+    The selected category applies to every PDF in this upload.
+    Upload different categories separately.
+</p>
+
+<label for="pdfs">Choose one or more PDF files</label>
+<input id="pdfs" type="file" name="pdfs"
+       accept=".pdf,application/pdf" multiple required>
 {% if ai_ready %}<label><input type="checkbox" name="use_ai" value="1" checked> Run Gemini AI extraction after Python extraction</label>{% else %}<p class="status">Python extraction works without Gemini. To enable AI, the website owner must add GEMINI_API_KEY in Render environment settings.</p>{% endif %}
 <div class="actions"><button type="submit">Extract uploaded PDFs</button><small>Processing can take several minutes. Please keep this tab open.</small></div></form></section>
 {% if records %}<section class="panel"><div class="topline"><h2>2. Review extracted results ({{ records|length }} records)</h2><a class="btn" href="{{ url_for('download') }}">⬇ Download Excel (all records)</a></div>
 <form method="get" action="{{ url_for('index') }}" class="actions"><label for="record">Select record</label><select name="record" id="record" onchange="this.form.submit()">{% for r in records %}<option value="{{ loop.index0 }}" {{ 'selected' if loop.index0 == selected else '' }}>{{ loop.index }}. {{ r['result'].get('file','EPD') }}</option>{% endfor %}</select><noscript><button type="submit">Open</button></noscript></form>
 {% if record %}<p class="status">Edit any field and click <strong>Save edits</strong> before downloading. Blank fields mean unavailable or not recovered.</p>
-<form method="post" action="{{ url_for('edit',index=selected) }}"><div class="scroll"><table><thead><tr><th>Excel field</th><th>Extracted value (editable)</th></tr></thead><tbody>
-{% for key,value in record['result']['data'].items() %}<tr><td>{{ key.replace('__',' | ') }}</td><td><input type="text" name="f_{{ loop.index0 }}" value="{{ value if value is not none else '' }}" autocomplete="off"></td></tr>{% endfor %}
+<form method="post" action="{{ url_for('edit',record_id=record['id']) }}"><div class="scroll"><table><thead><tr><th>Excel field</th><th>Extracted value (editable)</th></tr></thead><tbody>
+{% for key,value in record['result']['data'].items() %}
+<tr>
+    <td>{{ key.replace('__',' | ') }}</td>
+    <td>
+        {% if key == 'Material Category' %}
+        <select name="f_{{ loop.index0 }}" required>
+            <option value="">Select a material category</option>
+            {% for category in categories %}
+            <option value="{{ category }}"
+                    {% if category == value %}selected{% endif %}>
+                {{ category }}
+            </option>
+            {% endfor %}
+        </select>
+        {% else %}
+        <input type="text"
+               name="f_{{ loop.index0 }}"
+               value="{{ value if value is not none else '' }}"
+               autocomplete="off">
+        {% endif %}
+    </td>
+</tr>
+{% endfor %}
 </tbody></table></div><div class="actions"><button type="submit">Save edits</button><a class="btn secondary" href="{{ url_for('download') }}">Download Excel</a></div></form>
-<form method="post" action="{{ url_for('remove',index=selected) }}" class="actions"><button class="danger" type="submit" onclick="return confirm('Remove this record?')">Remove selected record</button></form>
+<form method="post" action="{{ url_for('remove',record_id=record['id']) }}" class="actions"><button class="danger" type="submit" onclick="return confirm('Remove this record?')">Remove selected record</button></form>
 <details><summary>Extraction warnings ({{ record['result'].get('warnings',[])|length }})</summary>{% for w in record['result'].get('warnings',[]) %}<div class="warning">{{ w }}</div>{% endfor %}</details>
 <details><summary>Source evidence ({{ record['result'].get('evidence',[])|length }})</summary><div class="scroll"><table><tr><th>Field</th><th>Value</th><th>Page</th><th>Source text</th></tr>{% for e in record['result'].get('evidence',[]) %}<tr><td>{{ e.get('field','') }}</td><td>{{ e.get('value','') }}</td><td>{{ e.get('page','') }}</td><td>{{ e.get('raw','') }}</td></tr>{% endfor %}</table></div></details>
 <details><summary>Gemini AI review ({{ record['result'].get('ai_review',[])|length }})</summary><div class="scroll"><table><tr><th>Field</th><th>AI proposal</th><th>Decision</th><th>Page</th></tr>{% for e in record['result'].get('ai_review',[]) %}<tr><td>{{ e.get('field','') }}</td><td>{{ e.get('proposed','') }}</td><td>{{ e.get('decision','') }}</td><td>{{ e.get('page','') }}</td></tr>{% endfor %}</table></div></details>
 {% endif %}</section>{% else %}<section class="panel"><p class="muted">Your extracted records will appear here.</p></section>{% endif %}
-<section class="panel"><small>Records are temporary and isolated per browser session. Download your Excel before closing the browser or leaving the website inactive. PDFs are sent to Google only if Gemini is enabled. Do not upload confidential PDFs unless institutional policy permits it.</small></section>
+<section class="panel"><small>Records are stored in the shared project database. All website users can view, edit, export and remove saved records.</small></section>
+<p>
+    <a class="btn secondary" href="{{ url_for('download') }}">
+        Download database Excel — Combined + 63 categories
+    </a>
+</p>
 </main></body></html>'''
 
 
 def user_records():
-    with LOCK:
-        now = time.time()
-        for k, v in list(STORE.items()):
-            if now - v['last'] > TTL:
-                del STORE[k]
-        sid = session.get('sid')
-        if not sid or sid not in STORE:
-            sid = uuid.uuid4().hex
-            session['sid'] = sid
-            STORE[sid] = {'last': now, 'records': []}
-        STORE[sid]['last'] = now
-        return STORE[sid]['records']
+    """Load saved records from the shared Turso database."""
+    return list_records()
 
 
 @app.get('/')
@@ -80,12 +119,18 @@ def index():
         selected = 0
     selected = max(0, min(selected, len(records)-1)) if records else 0
     return render_template_string(PAGE, records=records, record=records[selected] if records else None,
-                                  selected=selected, ai_ready=bool(API_KEY))
+                                  selected=selected,
+                                  ai_ready=bool(API_KEY),
+                                  categories=CATEGORIES)
 
 
 @app.post('/upload')
 def upload():
-    records = user_records()
+        category = request.form.get('material_category', '')
+
+        if category not in CATEGORIES:
+            flash('Please select a valid material category.', 'error')
+            return redirect(url_for('index'))
     uploads = [f for f in request.files.getlist('pdfs') if f.filename]
     if not uploads:
         flash('Please select at least one PDF.', 'error')
@@ -121,19 +166,39 @@ def upload():
                     except Exception as exc:
                         result.setdefault('warnings', []).insert(0, 'AI PASS FAILED: ' + str(exc))
                         result['ai_failed'] = True
-                records.append({'id': len(records)+1, 'created': datetime.now().isoformat(timespec='seconds'), 'result': result})
+                                result['data']['Material Category'] = category
+                                insert_record({
+                    'id': uuid.uuid4().hex,
+                    'created': datetime.now().isoformat(
+                        timespec='microseconds'
+                    ),
+                    'result': result,
+                })
                 flash(f'Processed {name}.' + (' Gemini failed; Python results retained.' if result.get('ai_failed') else ''))
             except Exception as exc:
                 flash(f'Extraction failed for {name}: {exc}', 'error')
     return redirect(url_for('index'))
 
 
-@app.post('/edit/<int:index>')
-def edit(index):
-    records = user_records()
-    if not 0 <= index < len(records):
+@app.post('/edit/<record_id>')
+def edit(record_id):
+    record = get_record(record_id)
+    if record is None:
         abort(404)
-    result = records[index]['result']
+
+    result = record['result']
+        category_index = list(result['data']).index('Material Category')
+    selected_category = request.form.get(
+        f'f_{category_index}', ''
+    )
+
+    if selected_category not in CATEGORIES:
+        flash(
+            'Please select a valid material category. '
+            'No changes were saved.',
+            'error',
+        )
+        return redirect(url_for('index'))
     for i, key in enumerate(result['data']):
         val = request.form.get(f'f_{i}', '').strip()
         if val and (key.startswith('__') or key in {HEADERS[j] for j in (15,17,19,21,40,41,42,43,110)}):
@@ -148,32 +213,48 @@ def edit(index):
                 'raw': str(val), 'method': 'manual web review edit', 'status': 'user supplied'})
             result['data'][key] = val
     result['reviewed'] = True
-    flash('Edits saved. You can now download Excel.')
-    return redirect(url_for('index', record=index))
+    update_record(record_id, result)
+    flash('Record saved to the database.')
+    return redirect(url_for('index'))
 
 
-@app.post('/remove/<int:index>')
-def remove(index):
-    records = user_records()
-    if not 0 <= index < len(records):
+@app.post('/remove/<record_id>')
+def remove(record_id):
+    record = get_record(record_id)
+    if record is None:
         abort(404)
-    records.pop(index)
-    flash('Record removed.')
+
+    delete_record(record_id)
+    flash('Record removed from the database.')
     return redirect(url_for('index'))
 
 
 @app.get('/download')
 def download():
     records = user_records()
-    if not records:
-        flash('Extract a PDF first.', 'error')
-        return redirect(url_for('index'))
-    with tempfile.TemporaryDirectory(prefix='epd_excel_') as directory:
+
+    with tempfile.TemporaryDirectory(
+        prefix='epd_excel_'
+    ) as directory:
         target = Path(directory) / 'EPD_Extracted_Results.xlsx'
-        save_excel(records, target)
+
+        try:
+            save_category_excel(records, target)
+        except ValueError as exc:
+            flash(str(exc), 'error')
+            return redirect(url_for('index'))
+
         data = target.read_bytes()
-    return send_file(io.BytesIO(data), mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                     as_attachment=True, download_name='EPD_Extracted_Results.xlsx')
+
+    return send_file(
+        io.BytesIO(data),
+        mimetype=(
+            'application/vnd.openxmlformats-officedocument.'
+            'spreadsheetml.sheet'
+        ),
+        as_attachment=True,
+        download_name='EPD_Extracted_Results.xlsx',
+    )
 
 
 @app.errorhandler(RequestEntityTooLarge)
@@ -181,7 +262,16 @@ def too_large(exc):
     flash('Upload too large. Select up to 5 PDFs, each under 15 MB.', 'error')
     return redirect(url_for('index'))
 
-
+@app.errorhandler(DatabaseError)
+def database_error(exc):
+    return render_template_string(
+        """
+        <h1>Database connection needs attention</h1>
+        <p>{{ message }}</p>
+        <p>Check the Turso configuration, then reload the website.</p>
+        """,
+        message=str(exc),
+    ), 503
 @app.get('/health')
 def health():
     return 'ok', 200
