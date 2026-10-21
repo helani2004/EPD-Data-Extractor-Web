@@ -124,61 +124,6 @@ def index():
                                   categories=CATEGORIES)
 
 
-@app.post('/upload')
-def upload():
-    category = request.form.get('material_category', '')
-
-    if category not in CATEGORIES:
-        flash('Please select a valid material category.', 'error')
-        return redirect(url_for('index'))
-
-    uploads = [f for f in request.files.getlist('pdfs') if f.filename]
-    if not uploads:
-        flash('Please select at least one PDF.', 'error')
-        return redirect(url_for('index'))
-    if len(uploads) > 5:
-        flash('Please upload no more than 5 PDFs at a time.', 'error')
-        return redirect(url_for('index'))
-    use_ai = bool(API_KEY and request.form.get('use_ai') == '1')
-    for upload_file in uploads:
-        name = Path(upload_file.filename).name
-        if not name.lower().endswith('.pdf'):
-            flash(f'Skipped {name}: PDF files only.', 'error')
-            continue
-        with tempfile.TemporaryDirectory(prefix='epd_render_') as directory:
-            path = Path(directory) / 'input.pdf'
-            content = upload_file.read()
-            if not content.startswith(b'%PDF-'):
-                flash(f'Skipped {name}: file is not a valid PDF.', 'error')
-                continue
-            if len(content) > 15 * 1024 * 1024:
-                flash(f'Skipped {name}: maximum file size is 15 MB.', 'error')
-                continue
-            path.write_bytes(content)
-            try:
-                result = process(path)
-                result['file'] = name
-                for item in result.get('values', []):
-                    item['file'] = name
-                if use_ai:
-                    try:
-                        result = review_pdf(path, result, HEADERS, GROUPS, IMPACT_FIELDS,
-                                            API_KEY, MODEL, Path(directory) / 'ai_cache')
-                    except Exception as exc:
-                        result.setdefault('warnings', []).insert(0, 'AI PASS FAILED: ' + str(exc))
-                        result['ai_failed'] = True
-                                    result['data']['Material Category'] = category
-                                    insert_record({
-                                      'id': uuid.uuid4().hex,
-                                      'created': datetime.now().isoformat(
-                                         timespec='microseconds'
-                                       ),
-                                       'result': result,
-                                     })
-                flash(f'Processed {name}.' + (' Gemini failed; Python results retained.' if result.get('ai_failed') else ''))
-            except Exception as exc:
-                flash(f'Extraction failed for {name}: {exc}', 'error')
-    return redirect(url_for('index'))
 
 @app.post('/upload')
 def upload():
