@@ -44,14 +44,51 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 {% for kind,message in get_flashed_messages(with_categories=true) %}<div class="notice {{ 'error' if kind=='error' else '' }}">{{ message }}</div>{% endfor %}
 <section class="panel"><div class="topline"><h2>1. Upload EPD PDFs</h2><span class="badge">Gemini: {{ 'Configured' if ai_ready else 'Not configured' }}</span></div>
 <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
-<label for="pdfs">Choose one or more PDF files</label><input id="pdfs" type="file" name="pdfs" accept=".pdf,application/pdf" multiple required>
+<label for="category">Material Category (required)</label>
+<select id="category" name="material_category" required>
+    <option value="">Select a material category</option>
+    {% for category in categories %}
+    <option value="{{ category }}">{{ category }}</option>
+    {% endfor %}
+</select>
+
+<p class="status">
+    The selected category applies to every PDF in this upload.
+    Upload different categories separately.
+</p>
+
+<label for="pdfs">Choose one or more PDF files</label>
+<input id="pdfs" type="file" name="pdfs"
+       accept=".pdf,application/pdf" multiple required>
 {% if ai_ready %}<label><input type="checkbox" name="use_ai" value="1" checked> Run Gemini AI extraction after Python extraction</label>{% else %}<p class="status">Python extraction works without Gemini. To enable AI, the website owner must add GEMINI_API_KEY in Render environment settings.</p>{% endif %}
 <div class="actions"><button type="submit">Extract uploaded PDFs</button><small>Processing can take several minutes. Please keep this tab open.</small></div></form></section>
 {% if records %}<section class="panel"><div class="topline"><h2>2. Review extracted results ({{ records|length }} records)</h2><a class="btn" href="{{ url_for('download') }}">⬇ Download Excel (all records)</a></div>
 <form method="get" action="{{ url_for('index') }}" class="actions"><label for="record">Select record</label><select name="record" id="record" onchange="this.form.submit()">{% for r in records %}<option value="{{ loop.index0 }}" {{ 'selected' if loop.index0 == selected else '' }}>{{ loop.index }}. {{ r['result'].get('file','EPD') }}</option>{% endfor %}</select><noscript><button type="submit">Open</button></noscript></form>
 {% if record %}<p class="status">Edit any field and click <strong>Save edits</strong> before downloading. Blank fields mean unavailable or not recovered.</p>
 <form method="post" action="{{ url_for('edit',record_id=record['id']) }}"><div class="scroll"><table><thead><tr><th>Excel field</th><th>Extracted value (editable)</th></tr></thead><tbody>
-{% for key,value in record['result']['data'].items() %}<tr><td>{{ key.replace('__',' | ') }}</td><td><input type="text" name="f_{{ loop.index0 }}" value="{{ value if value is not none else '' }}" autocomplete="off"></td></tr>{% endfor %}
+{% for key,value in record['result']['data'].items() %}
+<tr>
+    <td>{{ key.replace('__',' | ') }}</td>
+    <td>
+        {% if key == 'Material Category' %}
+        <select name="f_{{ loop.index0 }}" required>
+            <option value="">Select a material category</option>
+            {% for category in categories %}
+            <option value="{{ category }}"
+                    {% if category == value %}selected{% endif %}>
+                {{ category }}
+            </option>
+            {% endfor %}
+        </select>
+        {% else %}
+        <input type="text"
+               name="f_{{ loop.index0 }}"
+               value="{{ value if value is not none else '' }}"
+               autocomplete="off">
+        {% endif %}
+    </td>
+</tr>
+{% endfor %}
 </tbody></table></div><div class="actions"><button type="submit">Save edits</button><a class="btn secondary" href="{{ url_for('download') }}">Download Excel</a></div></form>
 <form method="post" action="{{ url_for('remove',record_id=record['id']) }}" class="actions"><button class="danger" type="submit" onclick="return confirm('Remove this record?')">Remove selected record</button></form>
 <details><summary>Extraction warnings ({{ record['result'].get('warnings',[])|length }})</summary>{% for w in record['result'].get('warnings',[]) %}<div class="warning">{{ w }}</div>{% endfor %}</details>
@@ -76,11 +113,18 @@ def index():
         selected = 0
     selected = max(0, min(selected, len(records)-1)) if records else 0
     return render_template_string(PAGE, records=records, record=records[selected] if records else None,
-                                  selected=selected, ai_ready=bool(API_KEY))
+                                  selected=selected,
+                                  ai_ready=bool(API_KEY),
+                                  categories=CATEGORIES)
 
 
 @app.post('/upload')
 def upload():
+        category = request.form.get('material_category', '')
+
+        if category not in CATEGORIES:
+            flash('Please select a valid material category.', 'error')
+            return redirect(url_for('index'))
     uploads = [f for f in request.files.getlist('pdfs') if f.filename]
     if not uploads:
         flash('Please select at least one PDF.', 'error')
@@ -116,6 +160,7 @@ def upload():
                     except Exception as exc:
                         result.setdefault('warnings', []).insert(0, 'AI PASS FAILED: ' + str(exc))
                         result['ai_failed'] = True
+                                result['data']['Material Category'] = category
                                 insert_record({
                     'id': uuid.uuid4().hex,
                     'created': datetime.now().isoformat(
@@ -136,6 +181,18 @@ def edit(record_id):
         abort(404)
 
     result = record['result']
+        category_index = list(result['data']).index('Material Category')
+    selected_category = request.form.get(
+        f'f_{category_index}', ''
+    )
+
+    if selected_category not in CATEGORIES:
+        flash(
+            'Please select a valid material category. '
+            'No changes were saved.',
+            'error',
+        )
+        return redirect(url_for('index'))
     for i, key in enumerate(result['data']):
         val = request.form.get(f'f_{i}', '').strip()
         if val and (key.startswith('__') or key in {HEADERS[j] for j in (15,17,19,21,40,41,42,43,110)}):
