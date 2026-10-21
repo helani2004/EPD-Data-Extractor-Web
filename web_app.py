@@ -62,9 +62,25 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 <input id="pdfs" type="file" name="pdfs"
        accept=".pdf,application/pdf" multiple required>
 {% if ai_ready %}<label><input type="checkbox" name="use_ai" value="1" checked> Run Gemini AI extraction after Python extraction</label>{% else %}<p class="status">Python extraction works without Gemini. To enable AI, the website owner must add GEMINI_API_KEY in Render environment settings.</p>{% endif %}
-<div class="actions"><button type="submit">Extract uploaded PDFs</button><small>Processing can take several minutes. Please keep this tab open.</small></div></form></section>
-{% if records %}<section class="panel"><div class="topline"><h2>2. Review extracted results ({{ records|length }} records)</h2><a class="btn" href="{{ url_for('download') }}">⬇ Download Excel (all records)</a></div>
-<form method="get" action="{{ url_for('index') }}" class="actions"><label for="record">Select record</label><select name="record" id="record" onchange="this.form.submit()">{% for r in records %}<option value="{{ loop.index0 }}" {{ 'selected' if loop.index0 == selected else '' }}>{{ loop.index }}. {{ r['result'].get('file','EPD') }}</option>{% endfor %}</select><noscript><button type="submit">Open</button></noscript></form>
+<div class="actions"><button type="submit">Extract uploaded PDFs</button>
+<a class="btn secondary" href="{{ url_for('index') }}">
+    Clear / New entry
+</a>
+<small>Processing can take several minutes. Please keep this tab open.</small></div></form></section>
+{% if records %}<section class="panel"><div class="topline"><h2>2. Review extracted results ({{ records|length }} records)</h2></div>
+<form method="get" action="{{ url_for('index') }}" class="actions">
+    <label for="record">View a saved record</label>
+    <select name="record" id="record" onchange="this.form.submit()">
+        <option value="">Select a saved record</option>
+        {% for r in records %}
+        <option value="{{ r['id'] }}"
+                {% if r['id'] == selected_id %}selected{% endif %}>
+            {{ loop.index }}. {{ r['result'].get('file','EPD') }}
+        </option>
+        {% endfor %}
+    </select>
+    <noscript><button type="submit">Open</button></noscript>
+</form>
 {% if record %}<p class="status">Edit any field and click <strong>Save edits</strong> before downloading. Blank fields mean unavailable or not recovered.</p>
 <form method="post" action="{{ url_for('edit',record_id=record['id']) }}"><div class="scroll"><table><thead><tr><th>Excel field</th><th>Extracted value (editable)</th></tr></thead><tbody>
 {% for key,value in record['result']['data'].items() %}
@@ -90,7 +106,7 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
     </td>
 </tr>
 {% endfor %}
-</tbody></table></div><div class="actions"><button type="submit">Save edits</button><a class="btn secondary" href="{{ url_for('download') }}">Download Excel</a></div></form>
+</tbody></table></div><div class="actions"><button type="submit">Save edits</button></div></form>
 <form method="post" action="{{ url_for('remove',record_id=record['id']) }}" class="actions"><button class="danger" type="submit" onclick="return confirm('Remove this record?')">Remove selected record</button></form>
 <details><summary>Extraction warnings ({{ record['result'].get('warnings',[])|length }})</summary>{% for w in record['result'].get('warnings',[]) %}<div class="warning">{{ w }}</div>{% endfor %}</details>
 <details><summary>Source evidence ({{ record['result'].get('evidence',[])|length }})</summary><div class="scroll"><table><tr><th>Field</th><th>Value</th><th>Page</th><th>Source text</th></tr>{% for e in record['result'].get('evidence',[]) %}<tr><td>{{ e.get('field','') }}</td><td>{{ e.get('value','') }}</td><td>{{ e.get('page','') }}</td><td>{{ e.get('raw','') }}</td></tr>{% endfor %}</table></div></details>
@@ -99,7 +115,7 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 <section class="panel"><small>Records are stored in the shared project database. All website users can view, edit, export and remove saved records.</small></section>
 <p>
     <a class="btn secondary" href="{{ url_for('download') }}">
-        Download database Excel — Combined + 63 categories
+        Download Excel — All records
     </a>
 </p>
 </main></body></html>'''
@@ -113,16 +129,21 @@ def user_records():
 @app.get('/')
 def index():
     records = user_records()
-    try:
-        selected = int(request.args.get('record', len(records)-1))
-    except ValueError:
-        selected = 0
-    selected = max(0, min(selected, len(records)-1)) if records else 0
-    return render_template_string(PAGE, records=records, record=records[selected] if records else None,
-                                  selected=selected,
-                                  ai_ready=bool(API_KEY),
-                                  categories=CATEGORIES)
+    selected_id = request.args.get('record', '')
 
+    record = next(
+        (r for r in records if r['id'] == selected_id),
+        None,
+    )
+
+    return render_template_string(
+        PAGE,
+        records=records,
+        record=record,
+        selected_id=record['id'] if record else '',
+        ai_ready=bool(API_KEY),
+        categories=CATEGORIES,
+    )
 
 
 @app.post('/upload')
@@ -145,7 +166,7 @@ def upload():
     if len(uploads) > 5:
         flash('Please upload no more than 5 PDFs at a time.', 'error')
         return redirect(url_for('index'))
-
+    last_saved_id = None
     use_ai = bool(API_KEY and request.form.get('use_ai') == '1')
 
     for upload_file in uploads:
@@ -196,14 +217,15 @@ def upload():
 
                 result['data']['Material Category'] = category
 
+                new_record_id = uuid.uuid4().hex
                 insert_record({
-                    'id': uuid.uuid4().hex,
+                    'id': new_record_id,
                     'created': datetime.now().isoformat(
                         timespec='microseconds'
                     ),
                     'result': result,
                 })
-
+                last_saved_id = new_record_id
                 message = f'Processed and saved {name}.'
                 if result.get('ai_failed'):
                     message += ' Gemini failed; Python results retained.'
@@ -212,7 +234,11 @@ def upload():
             except Exception as exc:
                 flash(f'Extraction or saving failed for {name}: {exc}', 'error')
 
-    return redirect(url_for('index'))
+    return redirect(
+        url_for('index', record=last_saved_id)
+        if last_saved_id
+        else url_for('index')
+    )
 
 
 @app.post('/edit/<record_id>')
@@ -263,7 +289,7 @@ def edit(record_id):
     result['reviewed'] = True
     update_record(record_id, result)
     flash('Record saved to the database.')
-    return redirect(url_for('index'))
+    return redirect(url_for('index', record=record_id))
 
 
 @app.post('/remove/<record_id>')
