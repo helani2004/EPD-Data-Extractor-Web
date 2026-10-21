@@ -14,6 +14,15 @@ from flask import Flask, request, redirect, url_for, session, render_template_st
 from werkzeug.exceptions import RequestEntityTooLarge
 from extractor_core import process, save_excel, HEADERS, GROUPS, IMPACT_FIELDS
 from ai_review import review_pdf
+from material_categories import CATEGORIES
+from database import (
+    list_records,
+    get_record,
+    insert_record,
+    update_record,
+    delete_record,
+    DatabaseError,
+)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY') or os.urandom(32)
@@ -23,10 +32,7 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = os.environ.get('RENDER', '').lower() == 'true'
 API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
 MODEL = os.environ.get('EPD_GEMINI_MODEL', 'gemini-flash-latest').strip()
-# Records are isolated per browser, held in RAM, and expire after inactivity.
-STORE = {}
-LOCK = threading.RLock()
-TTL = 2 * 60 * 60
+
 
 PAGE = '''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>EPD Data Extractor</title><style>
@@ -57,18 +63,8 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 
 
 def user_records():
-    with LOCK:
-        now = time.time()
-        for k, v in list(STORE.items()):
-            if now - v['last'] > TTL:
-                del STORE[k]
-        sid = session.get('sid')
-        if not sid or sid not in STORE:
-            sid = uuid.uuid4().hex
-            session['sid'] = sid
-            STORE[sid] = {'last': now, 'records': []}
-        STORE[sid]['last'] = now
-        return STORE[sid]['records']
+    """Load saved records from the shared Turso database."""
+    return list_records()
 
 
 @app.get('/')
@@ -181,7 +177,16 @@ def too_large(exc):
     flash('Upload too large. Select up to 5 PDFs, each under 15 MB.', 'error')
     return redirect(url_for('index'))
 
-
+@app.errorhandler(DatabaseError)
+def database_error(exc):
+    return render_template_string(
+        """
+        <h1>Database connection needs attention</h1>
+        <p>{{ message }}</p>
+        <p>Check the Turso configuration, then reload the website.</p>
+        """,
+        message=str(exc),
+    ), 503
 @app.get('/health')
 def health():
     return 'ok', 200
