@@ -126,11 +126,12 @@ def index():
 
 @app.post('/upload')
 def upload():
-        category = request.form.get('material_category', '')
+    category = request.form.get('material_category', '')
 
-        if category not in CATEGORIES:
-            flash('Please select a valid material category.', 'error')
-            return redirect(url_for('index'))
+    if category not in CATEGORIES:
+        flash('Please select a valid material category.', 'error')
+        return redirect(url_for('index'))
+
     uploads = [f for f in request.files.getlist('pdfs') if f.filename]
     if not uploads:
         flash('Please select at least one PDF.', 'error')
