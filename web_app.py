@@ -167,14 +167,14 @@ def upload():
                     except Exception as exc:
                         result.setdefault('warnings', []).insert(0, 'AI PASS FAILED: ' + str(exc))
                         result['ai_failed'] = True
-                                result['data']['Material Category'] = category
-                                insert_record({
-                    'id': uuid.uuid4().hex,
-                    'created': datetime.now().isoformat(
-                        timespec='microseconds'
-                    ),
-                    'result': result,
-                })
+                                    result['data']['Material Category'] = category
+                                    insert_record({
+                                      'id': uuid.uuid4().hex,
+                                      'created': datetime.now().isoformat(
+                                         timespec='microseconds'
+                                       ),
+                                       'result': result,
+                                     })
                 flash(f'Processed {name}.' + (' Gemini failed; Python results retained.' if result.get('ai_failed') else ''))
             except Exception as exc:
                 flash(f'Extraction failed for {name}: {exc}', 'error')
@@ -188,7 +188,7 @@ def edit(record_id):
         abort(404)
 
     result = record['result']
-        category_index = list(result['data']).index('Material Category')
+       category_index = list(result['data']).index('Material Category')
     selected_category = request.form.get(
         f'f_{category_index}', ''
     )
