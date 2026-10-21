@@ -14,6 +14,7 @@ from flask import Flask, request, redirect, url_for, session, render_template_st
 from werkzeug.exceptions import RequestEntityTooLarge
 from extractor_core import process, save_excel, HEADERS, GROUPS, IMPACT_FIELDS
 from ai_review import review_pdf
+from category_export import save_category_excel
 from material_categories import CATEGORIES
 from database import (
     list_records,
@@ -95,7 +96,12 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 <details><summary>Source evidence ({{ record['result'].get('evidence',[])|length }})</summary><div class="scroll"><table><tr><th>Field</th><th>Value</th><th>Page</th><th>Source text</th></tr>{% for e in record['result'].get('evidence',[]) %}<tr><td>{{ e.get('field','') }}</td><td>{{ e.get('value','') }}</td><td>{{ e.get('page','') }}</td><td>{{ e.get('raw','') }}</td></tr>{% endfor %}</table></div></details>
 <details><summary>Gemini AI review ({{ record['result'].get('ai_review',[])|length }})</summary><div class="scroll"><table><tr><th>Field</th><th>AI proposal</th><th>Decision</th><th>Page</th></tr>{% for e in record['result'].get('ai_review',[]) %}<tr><td>{{ e.get('field','') }}</td><td>{{ e.get('proposed','') }}</td><td>{{ e.get('decision','') }}</td><td>{{ e.get('page','') }}</td></tr>{% endfor %}</table></div></details>
 {% endif %}</section>{% else %}<section class="panel"><p class="muted">Your extracted records will appear here.</p></section>{% endif %}
-<section class="panel"><small>Records are temporary and isolated per browser session. Download your Excel before closing the browser or leaving the website inactive. PDFs are sent to Google only if Gemini is enabled. Do not upload confidential PDFs unless institutional policy permits it.</small></section>
+<section class="panel"><small>Records are stored in the shared project database. All website users can view, edit, export and remove saved records.</small></section>
+<p>
+    <a class="btn secondary" href="{{ url_for('download') }}">
+        Download database Excel — Combined + 63 categories
+    </a>
+</p>
 </main></body></html>'''
 
 
@@ -226,15 +232,29 @@ def remove(record_id):
 @app.get('/download')
 def download():
     records = user_records()
-    if not records:
-        flash('Extract a PDF first.', 'error')
-        return redirect(url_for('index'))
-    with tempfile.TemporaryDirectory(prefix='epd_excel_') as directory:
+
+    with tempfile.TemporaryDirectory(
+        prefix='epd_excel_'
+    ) as directory:
         target = Path(directory) / 'EPD_Extracted_Results.xlsx'
-        save_excel(records, target)
+
+        try:
+            save_category_excel(records, target)
+        except ValueError as exc:
+            flash(str(exc), 'error')
+            return redirect(url_for('index'))
+
         data = target.read_bytes()
-    return send_file(io.BytesIO(data), mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                     as_attachment=True, download_name='EPD_Extracted_Results.xlsx')
+
+    return send_file(
+        io.BytesIO(data),
+        mimetype=(
+            'application/vnd.openxmlformats-officedocument.'
+            'spreadsheetml.sheet'
+        ),
+        as_attachment=True,
+        download_name='EPD_Extracted_Results.xlsx',
+    )
 
 
 @app.errorhandler(RequestEntityTooLarge)
