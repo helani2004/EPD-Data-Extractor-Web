@@ -134,10 +134,28 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 <details><summary>Gemini AI review ({{ record['result'].get('ai_review',[])|length }})</summary><div class="scroll"><table><tr><th>Field</th><th>AI proposal</th><th>Decision</th><th>Page</th></tr>{% for e in record['result'].get('ai_review',[]) %}<tr><td>{{ e.get('field','') }}</td><td>{{ e.get('proposed','') }}</td><td>{{ e.get('decision','') }}</td><td>{{ e.get('page','') }}</td></tr>{% endfor %}</table></div></details>
 {% endif %}</section>{% else %}<section class="panel"><p class="muted">Your extracted records will appear here.</p></section>{% endif %}
 <section class="panel"><small>Records are stored in the shared project database. All website users can view, edit, export and remove saved records.</small></section>
-<p>
-    <a class="btn secondary" href="{{ url_for('download') }}">
+<div class="actions">
+    <form method="get" action="{{ url_for('download') }}">
+        <input type="hidden" name="scope" value="session">
+        <input type="hidden" name="visit_token"
+               data-visit-token>
+
+        <button id="session-download-button"
+                type="submit" disabled>
+            Download Excel — This session
+        </button>
+    </form>
+
+    <a class="btn secondary"
+       href="{{ url_for('download', scope='all') }}">
         Download Excel — All records
     </a>
+</div>
+
+<p class="status">
+    This session includes records added during your current session.
+    All records includes everything saved in the shared database.
+    Save edits before downloading.
 </p>
 </main>
 
@@ -174,6 +192,8 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
         document.querySelectorAll('[data-visit-token]').forEach(input => {
             input.value = visit.token;
         });
+
+        document.getElementById('session-download-button').disabled = false;
     }
 
     async function createVisit() {
@@ -238,7 +258,7 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
         extractButton.disabled = true;
         currentVisit = null;
         status.textContent = 'Starting a new session…';
-
+        document.getElementById('session-download-button').disabled = true;
         try {
             await createVisit();
             window.location.assign({{ url_for('index') | tojson }});
@@ -501,15 +521,56 @@ def remove(record_id):
     flash('Record removed from the database.')
     return redirect(url_for('index'))
 
-
 @app.get('/download')
 def download():
+    scope = request.args.get('scope', 'all')
+
+    if scope not in ('all', 'session'):
+        abort(400)
+
+    visit = None
+
+    if scope == 'session':
+        visit = load_visit(
+            request.args.get('visit_token', '')
+        )
+
+        if visit is None:
+            flash(
+                'Your session could not be identified. '
+                'Reload the page and try again.',
+                'error',
+            )
+            return redirect(url_for('index'))
+
     records = user_records()
+
+    if visit is not None:
+        records = [
+            record
+            for record in records
+            if record['result'].get('_visit', {}).get('id')
+            == visit['id']
+        ]
+
+        if not records:
+            flash(
+                'No saved records were found for this session. '
+                'Extract a PDF first.',
+                'error',
+            )
+            return redirect(url_for('index'))
+
+    filename = (
+        'EPD_This_Session.xlsx'
+        if scope == 'session'
+        else 'EPD_All_Records.xlsx'
+    )
 
     with tempfile.TemporaryDirectory(
         prefix='epd_excel_'
     ) as directory:
-        target = Path(directory) / 'EPD_Extracted_Results.xlsx'
+        target = Path(directory) / filename
 
         try:
             save_category_excel(records, target)
@@ -526,9 +587,8 @@ def download():
             'spreadsheetml.sheet'
         ),
         as_attachment=True,
-        download_name='EPD_Extracted_Results.xlsx',
+        download_name=filename,
     )
-
 
 @app.errorhandler(RequestEntityTooLarge)
 def too_large(exc):
