@@ -38,12 +38,72 @@ MODEL = os.environ.get('EPD_GEMINI_MODEL', 'gemini-flash-latest').strip()
 
 
 PAGE = '''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>EPD Data Extractor</title><style>
+<title>EPD Data Extractor</title><div id="processing-indicator"
+     role="status"
+     aria-live="polite"
+     hidden>
+    <div class="processing-card">
+        <div class="processing-spinner" aria-hidden="true"></div>
+        <h2>Processing your PDFs…</h2>
+        <p>
+            Extracting data and running Gemini if selected.
+        </p>
+        <p class="status">
+            This may take several minutes.
+            Please keep this tab open.
+        </p>
+    </div>
+</div><style>
 :root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#192b3d;background:#f3f6fa}*{box-sizing:border-box}body{margin:0}
 header{background:#152a43;color:white;padding:23px max(20px,calc((100vw - 1150px)/2))}header h1{margin:0 0 5px;font-size:26px}header p{margin:0;color:#c8d6e6}
 main{max-width:1150px;margin:24px auto;padding:0 16px}.panel{background:white;border:1px solid #e0e7ef;border-radius:12px;padding:22px;margin-bottom:20px;box-shadow:0 3px 15px #192b3d0a}
 h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[type=text],select{padding:10px;border:1px solid #c7d3df;border-radius:7px;max-width:100%;font:inherit}input[type=file]{display:block;width:100%;margin:12px 0}.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:15px}button,.btn{background:#1469a3;border:0;border-radius:7px;color:white;padding:11px 17px;text-decoration:none;cursor:pointer;font-weight:600;font-size:14px;display:inline-block}.btn.secondary,button.secondary{background:#e7eef5;color:#173a58}.btn.danger,button.danger{background:#9b3434}button:hover,.btn:hover{filter:brightness(.93)}small,.muted{color:#5a6979}.notice{padding:12px 15px;border-radius:7px;margin-bottom:12px;background:#e8f4ff}.notice.error{background:#ffebeb}.status{font-size:14px;color:#526579}.scroll{max-height:550px;overflow:auto;border:1px solid #e4e9ef;border-radius:8px}table{border-collapse:collapse;width:100%}td,th{padding:9px 12px;border-bottom:1px solid #e7edf2;text-align:left;font-size:13px;vertical-align:middle}th{background:#f0f5f9;position:sticky;top:0}td:first-child{width:48%;word-break:break-word}td input{width:100%;min-width:180px}.topline{display:flex;justify-content:space-between;align-items:center;gap:15px;flex-wrap:wrap}.fieldhead{font-weight:700;margin:16px 0 8px}.badge{font-size:12px;background:#e5f3ea;color:#22673b;padding:4px 9px;border-radius:12px}.warning{background:#fff6e3;padding:10px;border-radius:7px;margin:7px 0;word-break:break-word}details{margin-top:14px}details summary{cursor:pointer;font-weight:600}code{font-size:12px} .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:650px){.grid{grid-template-columns:1fr}header{padding:20px}}
-</style></head><body><header><h1>📄 EPD Data Extractor</h1><p>Upload PDF → extract → review and edit → download 111-column Excel</p></header><main>
+#processing-indicator[hidden] {
+    display: none;
+}
+
+#processing-indicator {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(21, 42, 67, 0.65);
+    padding: 20px;
+}
+
+.processing-card {
+    background: white;
+    border-radius: 12px;
+    padding: 30px;
+    width: 100%;
+    max-width: 420px;
+    text-align: center;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+}
+
+.processing-spinner {
+    width: 48px;
+    height: 48px;
+    margin: 0 auto 18px;
+    border: 5px solid #e0e7ef;
+    border-top-color: #1469a3;
+    border-radius: 50%;
+    animation: processing-spin 0.9s linear infinite;
+}
+
+@keyframes processing-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .processing-spinner {
+        animation: none;
+    }
+}</style></head><body><header><h1>📄 EPD Data Extractor</h1><p>Upload PDF → extract → review and edit → download 111-column Excel</p></header><main>
 {% for kind,message in get_flashed_messages(with_categories=true) %}<div class="notice {{ 'error' if kind=='error' else '' }}">{{ message }}</div>{% endfor %}
 <section class="panel"><div class="topline"><h2>1. Upload EPD PDFs</h2><span class="badge">Gemini: {{ 'Configured' if ai_ready else 'Not configured' }}</span></div>
 <form id="upload-form" method="post"
@@ -168,7 +228,9 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
     const newSessionButton = document.getElementById('new-session-button');
     const status = document.getElementById('session-status');
 
-    let currentVisit = null;
+    let processing = false;
+    const processingIndicator =
+        document.getElementById('processing-indicator');
 
     function showVisit(visit) {
         currentVisit = visit;
@@ -246,10 +308,36 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
     }
 
     uploadForm.addEventListener('submit', event => {
+        if (processing) {
+            event.preventDefault();
+            return;
+        }
+
         if (!currentVisit) {
             event.preventDefault();
             status.textContent =
                 'Please wait for your session to be ready.';
+            return;
+        }
+
+        processing = true;
+        processingIndicator.hidden = false;
+        extractButton.disabled = true;
+        extractButton.textContent = 'Processing…';
+        newSessionButton.disabled = true;
+        uploadForm.setAttribute('aria-busy', 'true');
+    });
+
+    window.addEventListener('pageshow', () => {
+        processing = false;
+        processingIndicator.hidden = true;
+        extractButton.textContent = 'Extract uploaded PDFs';
+        extractButton.disabled = !currentVisit;
+        newSessionButton.disabled = false;
+        uploadForm.removeAttribute('aria-busy');
+
+        if (currentVisit) {
+            showVisit(currentVisit);
         }
     });
 
