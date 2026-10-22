@@ -6,7 +6,8 @@ import time
 import uuid
 import tempfile
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
+from itsdangerous import URLSafeSerializer, BadSignature
 from pathlib import Path
 from collections import OrderedDict
 
@@ -45,7 +46,13 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 </style></head><body><header><h1>📄 EPD Data Extractor</h1><p>Upload PDF → extract → review and edit → download 111-column Excel</p></header><main>
 {% for kind,message in get_flashed_messages(with_categories=true) %}<div class="notice {{ 'error' if kind=='error' else '' }}">{{ message }}</div>{% endfor %}
 <section class="panel"><div class="topline"><h2>1. Upload EPD PDFs</h2><span class="badge">Gemini: {{ 'Configured' if ai_ready else 'Not configured' }}</span></div>
-<form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
+<form id="upload-form" method="post"
+      action="{{ url_for('upload') }}"
+      enctype="multipart/form-data">
+<input type="hidden" name="visit_token" id="visit-token">
+<p id="session-status" class="status" aria-live="polite">
+    Preparing your session…
+</p>
 <label for="category">Material Category (required)</label>
 <select id="category" name="material_category" required>
     <option value="">Select a material category</option>
@@ -63,9 +70,14 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 <input id="pdfs" type="file" name="pdfs"
        accept=".pdf,application/pdf" multiple required>
 {% if ai_ready %}<label><input type="checkbox" name="use_ai" value="1" checked> Run Gemini AI extraction after Python extraction</label>{% else %}<p class="status">Python extraction works without Gemini. To enable AI, the website owner must add GEMINI_API_KEY in Render environment settings.</p>{% endif %}
-<div class="actions"><button type="submit">Extract uploaded PDFs</button>
+<div class="actions"><button id="extract-button" type="submit" disabled>
+    Extract uploaded PDFs
+</button>
 <a class="btn secondary" href="{{ url_for('index') }}">
     Clear / New entry
+    <button id="new-session-button" type="button" class="secondary">
+    Start new session
+</button>
 </a>
 <small>Processing can take several minutes. Please keep this tab open.</small></div></form></section>
 {% if records %}<section class="panel"><div class="topline"><h2>2. Review extracted results ({{ records|length }} records)</h2></div>
@@ -127,14 +139,172 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
         Download Excel — All records
     </a>
 </p>
-</main></body></html>'''
+</main>
+
+<script>
+(() => {
+    const storageKey = 'epd-visit-v1';
+    const uploadForm = document.getElementById('upload-form');
+    const tokenInput = document.getElementById('visit-token');
+    const extractButton = document.getElementById('extract-button');
+    const newSessionButton = document.getElementById('new-session-button');
+    const status = document.getElementById('session-status');
+
+    let currentVisit = null;
+
+    function showVisit(visit) {
+        currentVisit = visit;
+        tokenInput.value = visit.token;
+        extractButton.disabled = false;
+
+        const started = new Intl.DateTimeFormat('en-GB', {
+            timeZone: 'Asia/Colombo',
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false,
+            timeZoneName: 'short'
+        }).format(new Date(visit.started_at));
+
+        status.textContent = 'Session started: ' + started;
+
+        document.querySelectorAll('[data-visit-token]').forEach(input => {
+            input.value = visit.token;
+        });
+    }
+
+    async function createVisit() {
+        const response = await fetch(
+            {{ url_for('start_session') | tojson }},
+            {
+                method: 'POST',
+                credentials: 'same-origin',
+                cache: 'no-store'
+            }
+        );
+
+        if (!response.ok) {
+            throw new Error('Could not start the session.');
+        }
+
+        const visit = await response.json();
+
+        sessionStorage.setItem(storageKey, JSON.stringify(visit));
+        showVisit(visit);
+    }
+
+    async function prepareVisit() {
+        try {
+            let stored = null;
+
+            try {
+                stored = JSON.parse(sessionStorage.getItem(storageKey));
+            } catch {
+                sessionStorage.removeItem(storageKey);
+            }
+
+            if (
+                stored &&
+                typeof stored.token === 'string' &&
+                typeof stored.started_at === 'string' &&
+                Number.isFinite(Date.parse(stored.started_at))
+            ) {
+                showVisit(stored);
+            } else {
+                await createVisit();
+            }
+        } catch (error) {
+            currentVisit = null;
+            extractButton.disabled = true;
+            status.textContent =
+                'Unable to prepare your session. Allow browser storage ' +
+                'and reload the page, or click Start new session.';
+        }
+    }
+
+    uploadForm.addEventListener('submit', event => {
+        if (!currentVisit) {
+            event.preventDefault();
+            status.textContent =
+                'Please wait for your session to be ready.';
+        }
+    });
+
+    newSessionButton.addEventListener('click', async () => {
+        newSessionButton.disabled = true;
+        extractButton.disabled = true;
+        currentVisit = null;
+        status.textContent = 'Starting a new session…';
+
+        try {
+            await createVisit();
+            window.location.assign({{ url_for('index') | tojson }});
+        } catch (error) {
+            status.textContent =
+                'Could not start a new session. Please try again.';
+        } finally {
+            newSessionButton.disabled = false;
+        }
+    });
+
+    prepareVisit();
+})();
+</script>
+
+</body></html>'''
 
 
 def user_records():
     """Load saved records from the shared Turso database."""
     return list_records()
 
+def visit_signer():
+    """Sign visit details so the browser cannot alter them."""
+    return URLSafeSerializer(
+        app.secret_key,
+        salt='epd-visit-v1',
+    )
 
+
+def load_visit(token):
+    """Read and validate signed visit details."""
+    if not token:
+        return None
+
+    try:
+        visit = visit_signer().loads(token)
+    except BadSignature:
+        return None
+
+    if not isinstance(visit, dict):
+        return None
+
+    if not isinstance(visit.get('id'), str):
+        return None
+
+    if not isinstance(visit.get('started_at'), str):
+        return None
+
+    return visit
+
+
+@app.post('/session/start')
+def start_session():
+    """Create one identifier and start time for a new visit."""
+    visit = {
+        'id': uuid.uuid4().hex,
+        'started_at': datetime.now(timezone.utc).isoformat(
+            timespec='seconds'
+        ),
+    }
+
+    return {
+        'token': visit_signer().dumps(visit),
+        'started_at': visit['started_at'],
+    }
 @app.get('/')
 def index():
     records = user_records()
@@ -163,6 +333,16 @@ def index():
 
 @app.post('/upload')
 def upload():
+    visit = load_visit(request.form.get('visit_token', ''))
+
+    if visit is None:
+        flash(
+            'Your session could not be identified. '
+            'Reload the page and try again.',
+            'error',
+        )
+        return redirect(url_for('index'))
+
     category = request.form.get('material_category', '')
 
     if category not in CATEGORIES:
@@ -231,6 +411,7 @@ def upload():
                         result['ai_failed'] = True
 
                 result['data']['Material Category'] = category
+                result['_visit'] = dict(visit)
 
                 new_record_id = uuid.uuid4().hex
                 insert_record({
