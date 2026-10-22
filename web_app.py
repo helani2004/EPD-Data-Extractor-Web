@@ -16,6 +16,7 @@ from extractor_core import process, save_excel, HEADERS, GROUPS, IMPACT_FIELDS
 from ai_review import review_pdf
 from category_export import save_category_excel
 from material_categories import CATEGORIES
+from record_fields import excel_fields, filled_count
 from database import (
     list_records,
     get_record,
@@ -81,11 +82,19 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
     </select>
     <noscript><button type="submit">Open</button></noscript>
 </form>
-{% if record %}<p class="status">Edit any field and click <strong>Save edits</strong> before downloading. Blank fields mean unavailable or not recovered.</p>
+{% if record %}
+<p class="notice">
+    <strong>{{ filled_columns }}/{{ total_columns }} columns filled</strong>
+</p>
+<p class="status">
+    Edit any field and click <strong>Save edits</strong> before downloading.
+    Blank fields mean unavailable or not recovered.
+</p>
 <form method="post" action="{{ url_for('edit',record_id=record['id']) }}"><div class="scroll"><table><thead><tr><th>Excel field</th><th>Extracted value (editable)</th></tr></thead><tbody>
-{% for key,value in record['result']['data'].items() %}
+{% for label,key in review_fields %}
+{% set value = record['result']['data'].get(key, '') %}
 <tr>
-    <td>{{ key.replace('__',' | ') }}</td>
+    <td>{{ label }}</td>
     <td>
         {% if key == 'Material Category' %}
         <select name="f_{{ loop.index0 }}" required>
@@ -143,6 +152,12 @@ def index():
         selected_id=record['id'] if record else '',
         ai_ready=bool(API_KEY),
         categories=CATEGORIES,
+        review_fields=excel_fields(),
+        filled_columns=(
+            filled_count(record['result']['data'])
+            if record else 0
+        ),
+        total_columns=len(HEADERS),        
     )
 
 
@@ -249,7 +264,10 @@ def edit(record_id):
         abort(404)
 
     result = record['result']
-    category_index = list(result['data']).index('Material Category')
+    category_index = next(
+        i for i, (_, key) in enumerate(excel_fields())
+        if key == 'Material Category'
+    )
     selected_category = request.form.get(f'f_{category_index}', '')
 
     if selected_category not in CATEGORIES:
@@ -264,7 +282,7 @@ def edit(record_id):
         for j in (15, 17, 19, 21, 40, 41, 42, 43, 110)
     }
 
-    for i, key in enumerate(result['data']):
+    for i, (_, key) in enumerate(excel_fields()):
         val = request.form.get(f'f_{i}', '').strip()
 
         if val and (key.startswith('__') or key in numeric_fields):
@@ -275,7 +293,7 @@ def edit(record_id):
             except ValueError:
                 pass
 
-        if val != result['data'][key]:
+        if val != result['data'].get(key, ''):
             result.setdefault('evidence', []).append({
                 'field': key,
                 'value': val,
