@@ -38,22 +38,7 @@ MODEL = os.environ.get('EPD_GEMINI_MODEL', 'gemini-flash-latest').strip()
 
 
 PAGE = '''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>EPD Data Extractor</title><div id="processing-indicator"
-     role="status"
-     aria-live="polite"
-     hidden>
-    <div class="processing-card">
-        <div class="processing-spinner" aria-hidden="true"></div>
-        <h2>Processing your PDFs…</h2>
-        <p>
-            Extracting data and running Gemini if selected.
-        </p>
-        <p class="status">
-            This may take several minutes.
-            Please keep this tab open.
-        </p>
-    </div>
-</div><style>
+<title>EPD Data Extractor</title><style>
 :root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#192b3d;background:#f3f6fa}*{box-sizing:border-box}body{margin:0}
 header{background:#152a43;color:white;padding:23px max(20px,calc((100vw - 1150px)/2))}header h1{margin:0 0 5px;font-size:26px}header p{margin:0;color:#c8d6e6}
 main{max-width:1150px;margin:24px auto;padding:0 16px}.panel{background:white;border:1px solid #e0e7ef;border-radius:12px;padding:22px;margin-bottom:20px;box-shadow:0 3px 15px #192b3d0a}
@@ -135,10 +120,11 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 </button>
 <a class="btn secondary" href="{{ url_for('index') }}">
     Clear / New entry
-    <button id="new-session-button" type="button" class="secondary">
+</a>
+
+<button id="new-session-button" type="button" class="secondary">
     Start new session
 </button>
-</a>
 <small>Processing can take several minutes. Please keep this tab open.</small></div></form></section>
 {% if records %}<section class="panel"><div class="topline"><h2>2. Review extracted results ({{ records|length }} records)</h2></div>
 <form method="get" action="{{ url_for('index') }}" class="actions">
@@ -219,6 +205,21 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 </p>
 </main>
 
+<div id="processing-indicator"
+     role="status"
+     aria-live="polite"
+     hidden>
+    <div class="processing-card">
+        <div class="processing-spinner" aria-hidden="true"></div>
+        <h2>Processing your PDFs…</h2>
+        <p>Extracting data and running Gemini if selected.</p>
+        <p class="status">
+            This may take several minutes.
+            Please keep this tab open.
+        </p>
+    </div>
+</div>
+
 <script>
 (() => {
     const storageKey = 'epd-visit-v1';
@@ -228,6 +229,7 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
     const newSessionButton = document.getElementById('new-session-button');
     const status = document.getElementById('session-status');
 
+    let currentVisit = null;
     let processing = false;
     const processingIndicator =
         document.getElementById('processing-indicator');
