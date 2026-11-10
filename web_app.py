@@ -88,7 +88,16 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
     .processing-spinner {
         animation: none;
     }
-}</style></head><body><header><h1>EPD Data Extractor</h1></header><main>
+}
+#review-form .empty-review-field {
+    border: 2px solid #b45309;
+    background: #fff7ed;
+}
+
+#empty-fields-warning[hidden] {
+    display: none;
+}
+</style></head><body><header><h1>EPD Data Extractor</h1></header><main>
 {% for kind,message in get_flashed_messages(with_categories=true) %}<div class="notice {{ 'error' if kind=='error' else '' }}">{{ message }}</div>{% endfor %}
 <section class="panel"><div class="topline"><h2>1. Upload EPD PDFs</h2><span class="badge">Gemini: {{ 'Configured' if ai_ready else 'Not configured' }}</span></div>
 <form id="upload-form" method="post"
@@ -162,7 +171,8 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
     </button>
     <span class="status">Changes are saved when you click Save edits.</span>
 </div>
-
+<p id="empty-fields-warning" class="notice error"
+   role="status" aria-live="polite" hidden></p>
 <div class="scroll"><table><thead><tr><th>Excel field</th><th>Extracted value (editable)</th></tr></thead><tbody>
 {% for label,key in review_fields %}
 {% set value = record['result']['data'].get(key, '') %}
@@ -470,6 +480,58 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 })();
 </script>
 
+<script>
+(() => {
+    const form = document.getElementById('review-form');
+    if (!form) return;
+
+    const warning = document.getElementById('empty-fields-warning');
+    const fields = Array.from(form.querySelectorAll(
+        'input[name^="f_"], textarea[name^="f_"], select[name^="f_"]'
+    ));
+
+    function checkFields() {
+        const empty = [];
+
+        fields.forEach(field => {
+            const blank = field.value.trim() === '';
+
+            field.classList.toggle('empty-review-field', blank);
+            field.setAttribute('aria-invalid', String(blank));
+            field.setCustomValidity(
+                blank ? 'Enter a value, or - if unavailable.' : ''
+            );
+
+            if (blank) empty.push(field);
+        });
+
+        warning.hidden = empty.length === 0;
+        warning.textContent = empty.length
+            ? empty.length + ' empty fields remain. Fill each field, ' +
+              'or enter - where information is unavailable. ' +
+              'Material Category must be selected from the list.'
+            : '';
+
+        return empty;
+    }
+
+    form.addEventListener('input', checkFields);
+    form.addEventListener('change', checkFields);
+
+    form.addEventListener('submit', event => {
+        const empty = checkFields();
+
+        if (empty.length) {
+            event.preventDefault();
+            empty[0].focus();
+            empty[0].reportValidity();
+        }
+    });
+
+    checkFields();
+})();
+</script>
+
 </body></html>'''
 
 
@@ -660,29 +722,63 @@ def edit(record_id):
     if record is None:
         abort(404)
 
-    result = record['result']
-    category_index = next(
-        i for i, (_, key) in enumerate(excel_fields())
-        if key == 'Material Category'
-    )
-    selected_category = request.form.get(f'f_{category_index}', '')
+    fields = excel_fields()
 
-    if selected_category not in CATEGORIES:
-        flash(
-            'Please select a valid material category. No changes were saved.',
-            'error',
+    submitted = {
+        key: request.form.get(f'f_{i}', '').strip()
+        for i, (_, key) in enumerate(fields)
+    }
+
+    empty_labels = [
+        label
+        for label, key in fields
+        if submitted[key] == ''
+    ]
+
+    errors = []
+
+    if empty_labels:
+        errors.append(
+            f'{len(empty_labels)} fields are empty. '
+            'Enter a value, or - where information is unavailable.'
         )
-        return redirect(url_for('index'))
+
+    if submitted['Material Category'] not in CATEGORIES:
+        errors.append('Please select a valid material category.')
+
+    if errors:
+        # Display submitted values without saving them.
+        record['result']['data'] = {
+            **record['result']['data'],
+            **submitted,
+        }
+
+        for message in errors:
+            flash(message + ' No changes were saved.', 'error')
+
+        return render_template_string(
+            PAGE,
+            records=user_records(),
+            record=record,
+            selected_id=record_id,
+            ai_ready=bool(API_KEY),
+            categories=CATEGORIES,
+            review_fields=fields,
+            filled_columns=filled_count(record['result']['data']),
+            total_columns=len(HEADERS),
+        ), 422
+
+    result = record['result']
 
     numeric_fields = {
         HEADERS[j]
         for j in (15, 17, 19, 21, 40, 41, 42, 43, 110)
     }
 
-    for i, (_, key) in enumerate(excel_fields()):
-        val = request.form.get(f'f_{i}', '').strip()
+    for _, key in fields:
+        val = submitted[key]
 
-        if val and (key.startswith('__') or key in numeric_fields):
+        if key.startswith('__') or key in numeric_fields:
             try:
                 number = float(val)
                 if math.isfinite(number):
@@ -705,7 +801,6 @@ def edit(record_id):
     update_record(record_id, result)
     flash('Record saved to the database.')
     return redirect(url_for('index', record=record_id))
-
 
 @app.post('/remove/<record_id>')
 def remove(record_id):
