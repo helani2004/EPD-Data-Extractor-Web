@@ -137,7 +137,29 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
     Start new session
 </button>
 <small>Processing can take several minutes. Please keep this tab open.</small></div></form></section>
-{% if records %}<section class="panel"><div class="topline"><h2>2. Review extracted results ({{ records|length }} records)</h2></div>
+<section class="panel">
+    <h2>Search saved EPD</h2>
+
+    <form method="get"
+          action="{{ url_for('search_epd') }}"
+          class="actions">
+
+        <label for="epd-search">EPD number</label>
+
+        <input id="epd-search"
+               type="search"
+               name="epd_number"
+               placeholder="Enter the complete EPD number"
+               required>
+
+        <button type="submit">Search</button>
+    </form>
+
+    <p class="status">
+        Search by the complete EPD number to open its saved fields.
+        Edit the values below, then click Save edits.
+    </p>
+</section>{% if records %}<section id="review-results" class="panel"><div class="topline"><h2>2. Review extracted results ({{ records|length }} records)</h2></div>
 <form method="get" action="{{ url_for('index') }}" class="actions">
     <label for="record">View a saved record</label>
     <select name="record" id="record" onchange="this.form.submit()">
@@ -610,7 +632,56 @@ def index():
         total_columns=len(HEADERS),        
     )
 
+def normalise_epd_number(value):
+    """Match EPD numbers regardless of ASCII spaces or letter case."""
+    text = '' if value is None else str(value)
 
+    for character in (' ', '\t', '\r', '\n'):
+        text = text.replace(character, '')
+
+    return text.translate(str.maketrans(
+        'abcdefghijklmnopqrstuvwxyz',
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+    ))
+
+
+@app.get('/search-epd')
+def search_epd():
+    entered = request.args.get('epd_number', '')
+    wanted = normalise_epd_number(entered)
+
+    if not wanted or wanted == '-':
+        flash('Enter the complete EPD number to search.', 'error')
+        return redirect(url_for('index'))
+
+    matches = [
+        record
+        for record in user_records()
+        if normalise_epd_number(
+            record['result']['data'].get('EPD Number')
+        ) == wanted
+    ]
+
+    if not matches:
+        flash(
+            f'No saved record was found for EPD number "{entered}".',
+            'error',
+        )
+        return redirect(url_for('index'))
+
+    if len(matches) > 1:
+        flash(
+            'Multiple older records have this EPD number. '
+            'The first matching record has been opened. '
+            'Use the saved-record selector to inspect the others.',
+            'error',
+        )
+
+    return redirect(url_for(
+        'index',
+        record=matches[0]['id'],
+        _anchor='review-results',
+    ))
 @app.post('/upload')
 def upload():
     visit = load_visit(request.form.get('visit_token', ''))
@@ -829,7 +900,7 @@ def edit(record_id):
         ), 422
 
     flash('Record saved to the database.')
-    return redirect(url_for('index', record=record_id))
+    return redirect(url_for('index'))
 
 @app.post('/remove/<record_id>')
 def remove(record_id):
