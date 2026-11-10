@@ -88,7 +88,7 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
     .processing-spinner {
         animation: none;
     }
-}</style></head><body><header><h1>📄 EPD Data Extractor</h1><p>Upload PDF → extract → review and edit → download 111-column Excel</p></header><main>
+}</style></head><body><header><h1>EPD Data Extractor</h1></header><main>
 {% for kind,message in get_flashed_messages(with_categories=true) %}<div class="notice {{ 'error' if kind=='error' else '' }}">{{ message }}</div>{% endfor %}
 <section class="panel"><div class="topline"><h2>1. Upload EPD PDFs</h2><span class="badge">Gemini: {{ 'Configured' if ai_ready else 'Not configured' }}</span></div>
 <form id="upload-form" method="post"
@@ -152,7 +152,7 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 {% for label,key in review_fields %}
 {% set value = record['result']['data'].get(key, '') %}
 <tr>
-    <td>{{ label }}</td>
+    <td>{{ loop.index }}. {{ label }}</td>
     <td>
         {% if key == 'Material Category' %}
         <select name="f_{{ loop.index0 }}" required>
@@ -188,13 +188,13 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 
         <button id="session-download-button"
                 type="submit" disabled>
-            Download Excel — This session
+            Download current session
         </button>
     </form>
 
     <a class="btn secondary"
        href="{{ url_for('download', scope='all') }}">
-        Download Excel — All records
+        Download all records
     </a>
 </div>
 
