@@ -109,35 +109,92 @@ def get_record(record_id):
 
     return decode_record(result["rows"][0])
 
+class DuplicateRecordError(ValueError):
+    """The PDF or EPD number already exists."""
 
+
+def duplicate_guard(result, record_id):
+    """Build a database check that excludes the record being edited."""
+    data = result.get("data", {})
+    raw_epd = data.get("EPD Number")
+    epd = "" if raw_epd is None else str(raw_epd)
+
+    # Ignore ASCII whitespace and letter case; retain punctuation.
+    for character in (" ", "\t", "\r", "\n"):
+        epd = epd.replace(character, "")
+
+    epd = epd.translate(str.maketrans(
+        "abcdefghijklmnopqrstuvwxyz",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    ))
+
+    if epd == "-":
+        epd = ""
+
+    fingerprint = result.get("_pdf_sha256") or ""
+
+    stored_epd = (
+        "upper(replace(replace(replace(replace("
+        "coalesce(json_extract(result_json, '$.data.\"EPD Number\"'), ''), "
+        "' ', ''), char(9), ''), char(13), ''), char(10), ''))"
+    )
+
+    sql = (
+        "NOT EXISTS ("
+        "SELECT 1 FROM epd_records "
+        "WHERE id <> ? AND ("
+        f"(? <> '' AND {stored_epd} = ?) "
+        "OR (? <> '' AND "
+        "json_extract(result_json, '$._pdf_sha256') = ?)"
+        "))"
+    )
+
+    return sql, (record_id, epd, epd, fingerprint, fingerprint)
 def insert_record(record):
-    """Save a newly extracted record."""
-    execute(
-        "INSERT INTO epd_records "
-        "(id, created, result_json) VALUES (?, ?, ?)",
+    """Save a record only if its PDF and EPD number are unique."""
+    guard, guard_args = duplicate_guard(
+        record["result"], record["id"]
+    )
+
+    response = execute(
+        "INSERT INTO epd_records (id, created, result_json) "
+        "SELECT ?, ?, ? WHERE " + guard,
         (
             record["id"],
             record["created"],
             json.dumps(record["result"], ensure_ascii=False),
-        ),
-    )
-
-
-def update_record(record_id, result):
-    """Save changes to an existing record."""
-    response = execute(
-        "UPDATE epd_records SET result_json = ? WHERE id = ?",
-        (
-            json.dumps(result, ensure_ascii=False),
-            record_id,
-        ),
+        ) + guard_args,
     )
 
     if response.get("affected_row_count", 0) == 0:
-        raise DatabaseError(
-            "This record no longer exists. Reload the page."
+        raise DuplicateRecordError(
+            "This PDF or EPD number already exists. "
+            "Open the existing record to edit it."
         )
 
+def update_record(record_id, result):
+    """Update a record without duplicating another EPD."""
+    guard, guard_args = duplicate_guard(result, record_id)
+
+    response = execute(
+        "UPDATE epd_records SET result_json = ? "
+        "WHERE id = ? AND " + guard,
+        (
+            json.dumps(result, ensure_ascii=False),
+            record_id,
+        ) + guard_args,
+    )
+
+    if response.get("affected_row_count", 0) == 0:
+        if get_record(record_id) is None:
+            raise DatabaseError(
+                "This record no longer exists. Reload the page."
+            )
+
+        raise DuplicateRecordError(
+            "Another record already has this EPD number "
+            "or PDF. No changes were saved."
+        )
 
 def delete_record(record_id):
     """Permanently remove one record."""
