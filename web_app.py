@@ -2,6 +2,7 @@
 import os
 import io
 import math
+import hashlib
 import time
 import uuid
 import tempfile
@@ -18,6 +19,7 @@ from ai_review import review_pdf
 from category_export import save_category_excel
 from material_categories import CATEGORIES
 from record_fields import excel_fields, filled_count
+from database_browser import register_database_browser
 from database import (
     list_records,
     get_record,
@@ -25,6 +27,7 @@ from database import (
     update_record,
     delete_record,
     DatabaseError,
+    DuplicateRecordError,
 )
 
 app = Flask(__name__)
@@ -35,6 +38,7 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = os.environ.get('RENDER', '').lower() == 'true'
 API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
 MODEL = os.environ.get('EPD_GEMINI_MODEL', 'gemini-flash-latest').strip()
+register_database_browser(app, CATEGORIES)
 
 
 PAGE = '''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -88,7 +92,16 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
     .processing-spinner {
         animation: none;
     }
-}</style></head><body><header><h1>📄 EPD Data Extractor</h1><p>Upload PDF → extract → review and edit → download 111-column Excel</p></header><main>
+}
+#review-form .empty-review-field {
+    border: 2px solid #b45309;
+    background: #fff7ed;
+}
+
+#empty-fields-warning[hidden] {
+    display: none;
+}
+</style></head><body><header><h1>EPD Data Extractor</h1></header><main>
 {% for kind,message in get_flashed_messages(with_categories=true) %}<div class="notice {{ 'error' if kind=='error' else '' }}">{{ message }}</div>{% endfor %}
 <section class="panel"><div class="topline"><h2>1. Upload EPD PDFs</h2><span class="badge">Gemini: {{ 'Configured' if ai_ready else 'Not configured' }}</span></div>
 <form id="upload-form" method="post"
@@ -126,7 +139,35 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
     Start new session
 </button>
 <small>Processing can take several minutes. Please keep this tab open.</small></div></form></section>
-{% if records %}<section class="panel"><div class="topline"><h2>2. Review extracted results ({{ records|length }} records)</h2></div>
+<section class="panel">
+    <h2>Search saved EPD</h2>
+    <p>
+        <a class="btn secondary"
+           href="{{ url_for('browse_database') }}">
+            Browse database
+        </a>
+    </p>
+
+    <form method="get"
+          action="{{ url_for('search_epd') }}"
+          class="actions">
+
+        <label for="epd-search">EPD number</label>
+
+        <input id="epd-search"
+               type="search"
+               name="epd_number"
+               placeholder="Enter the complete EPD number"
+               required>
+
+        <button type="submit">Search</button>
+    </form>
+
+    <p class="status">
+        Search by the complete EPD number to open its saved fields.
+        Edit the values below, then click Save edits.
+    </p>
+</section>{% if records %}<section id="review-results" class="panel"><div class="topline"><h2>2. Review extracted results ({{ records|length }} records)</h2></div>
 <form method="get" action="{{ url_for('index') }}" class="actions">
     <label for="record">View a saved record</label>
     <select name="record" id="record" onchange="this.form.submit()">
@@ -148,11 +189,27 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
     Edit any field and click <strong>Save edits</strong> before downloading.
     Blank fields mean unavailable or not recovered.
 </p>
-<form method="post" action="{{ url_for('edit',record_id=record['id']) }}"><div class="scroll"><table><thead><tr><th>Excel field</th><th>Extracted value (editable)</th></tr></thead><tbody>
+<form id="review-form" method="post"
+      action="{{ url_for('edit',record_id=record['id']) }}">
+
+<div class="actions" role="toolbar" aria-label="Review editing tools">
+    <button id="undo-edit" type="button" class="secondary"
+            title="Undo" disabled>
+        ↶ Undo
+    </button>
+    <button id="redo-edit" type="button" class="secondary"
+            title="Redo" disabled>
+        ↷ Redo
+    </button>
+    <span class="status">Changes are saved when you click Save edits.</span>
+</div>
+<p id="empty-fields-warning" class="notice error"
+   role="status" aria-live="polite" hidden></p>
+<div class="scroll"><table><thead><tr><th>Excel field</th><th>Extracted value (editable)</th></tr></thead><tbody>
 {% for label,key in review_fields %}
 {% set value = record['result']['data'].get(key, '') %}
 <tr>
-    <td>{{ label }}</td>
+    <td>{{ loop.index }}. {{ label }}</td>
     <td>
         {% if key == 'Material Category' %}
         <select name="f_{{ loop.index0 }}" required>
@@ -174,7 +231,13 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 </tr>
 {% endfor %}
 </tbody></table></div><div class="actions"><button type="submit">Save edits</button></div></form>
-<form method="post" action="{{ url_for('remove',record_id=record['id']) }}" class="actions"><button class="danger" type="submit" onclick="return confirm('Remove this record?')">Remove selected record</button></form>
+<p>
+    <a class="btn danger"
+       href="{{ url_for('confirm_database_delete',
+                        record_id=record['id']) }}">
+        Delete selected entry
+    </a>
+</p>
 <details><summary>Extraction warnings ({{ record['result'].get('warnings',[])|length }})</summary>{% for w in record['result'].get('warnings',[]) %}<div class="warning">{{ w }}</div>{% endfor %}</details>
 <details><summary>Source evidence ({{ record['result'].get('evidence',[])|length }})</summary><div class="scroll"><table><tr><th>Field</th><th>Value</th><th>Page</th><th>Source text</th></tr>{% for e in record['result'].get('evidence',[]) %}<tr><td>{{ e.get('field','') }}</td><td>{{ e.get('value','') }}</td><td>{{ e.get('page','') }}</td><td>{{ e.get('raw','') }}</td></tr>{% endfor %}</table></div></details>
 <details><summary>Gemini AI review ({{ record['result'].get('ai_review',[])|length }})</summary><div class="scroll"><table><tr><th>Field</th><th>AI proposal</th><th>Decision</th><th>Page</th></tr>{% for e in record['result'].get('ai_review',[]) %}<tr><td>{{ e.get('field','') }}</td><td>{{ e.get('proposed','') }}</td><td>{{ e.get('decision','') }}</td><td>{{ e.get('page','') }}</td></tr>{% endfor %}</table></div></details>
@@ -188,13 +251,13 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 
         <button id="session-download-button"
                 type="submit" disabled>
-            Download Excel — This session
+            Download current session
         </button>
     </form>
 
     <a class="btn secondary"
        href="{{ url_for('download', scope='all') }}">
-        Download Excel — All records
+        Download all records
     </a>
 </div>
 
@@ -364,6 +427,149 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 })();
 </script>
 
+<script>
+(() => {
+    const form = document.getElementById('review-form');
+    if (!form) return;
+
+    const undoButton = document.getElementById('undo-edit');
+    const redoButton = document.getElementById('redo-edit');
+
+    const fields = Array.from(form.querySelectorAll(
+        'input[name], textarea[name], select[name]'
+    )).filter(field => ![
+        'hidden', 'submit', 'button'
+    ].includes(field.type));
+
+    const readValues = () => fields.map(field => field.value);
+
+    let history = [readValues()];
+    let position = 0;
+    let restoring = false;
+
+    function updateButtons() {
+        undoButton.disabled = position === 0;
+        redoButton.disabled = position === history.length - 1;
+    }
+
+    function rememberChange(event) {
+        if (restoring || !fields.includes(event.target)) return;
+        if (event.isComposing) return;
+
+        const values = readValues();
+        const previous = history[position];
+
+        if (values.every((value, index) => value === previous[index])) {
+            return;
+        }
+
+        // A new edit after Undo replaces the previous Redo history.
+        history = history.slice(0, position + 1);
+        history.push(values);
+
+        // Bound the amount of history kept in this page.
+        if (history.length > 201) {
+            history.shift();
+        }
+
+        position = history.length - 1;
+        updateButtons();
+    }
+
+    function restore(nextPosition) {
+        if (nextPosition < 0 || nextPosition >= history.length) return;
+
+        restoring = true;
+        position = nextPosition;
+
+        fields.forEach((field, index) => {
+            field.value = history[position][index];
+            field.dispatchEvent(new Event('input', { bubbles: true }));
+            field.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+
+        restoring = false;
+        updateButtons();
+    }
+
+    form.addEventListener('input', rememberChange);
+    form.addEventListener('change', rememberChange);
+    form.addEventListener('compositionend', rememberChange);
+
+    undoButton.addEventListener('click', () => restore(position - 1));
+    redoButton.addEventListener('click', () => restore(position + 1));
+
+    form.addEventListener('keydown', event => {
+        if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+        if (!fields.includes(event.target)) return;
+
+        const key = event.key.toLowerCase();
+
+        if (key === 'z') {
+            event.preventDefault();
+            restore(position + (event.shiftKey ? 1 : -1));
+        } else if (key === 'y') {
+            event.preventDefault();
+            restore(position + 1);
+        }
+    });
+
+    updateButtons();
+})();
+</script>
+
+<script>
+(() => {
+    const form = document.getElementById('review-form');
+    if (!form) return;
+
+    const warning = document.getElementById('empty-fields-warning');
+    const fields = Array.from(form.querySelectorAll(
+        'input[name^="f_"], textarea[name^="f_"], select[name^="f_"]'
+    ));
+
+    function checkFields() {
+        const empty = [];
+
+        fields.forEach(field => {
+            const blank = field.value.trim() === '';
+
+            field.classList.toggle('empty-review-field', blank);
+            field.setAttribute('aria-invalid', String(blank));
+            field.setCustomValidity(
+                blank ? 'Enter a value, or - if unavailable.' : ''
+            );
+
+            if (blank) empty.push(field);
+        });
+
+        warning.hidden = empty.length === 0;
+        warning.textContent = empty.length
+            ? empty.length + ' empty fields remain. Fill each field, ' +
+              'or enter - where information is unavailable. ' +
+              'Material Category must be selected from the list.'
+            : '';
+
+        return empty;
+    }
+
+    form.addEventListener('input', checkFields);
+    form.addEventListener('change', checkFields);
+
+    form.addEventListener('submit', event => {
+        const empty = checkFields();
+
+        if (empty.length) {
+            event.preventDefault();
+            empty[0].focus();
+            empty[0].reportValidity();
+        }
+    });
+
+    checkFields();
+})();
+</script>
+
 </body></html>'''
 
 
@@ -440,7 +646,56 @@ def index():
         total_columns=len(HEADERS),        
     )
 
+def normalise_epd_number(value):
+    """Match EPD numbers regardless of ASCII spaces or letter case."""
+    text = '' if value is None else str(value)
 
+    for character in (' ', '\t', '\r', '\n'):
+        text = text.replace(character, '')
+
+    return text.translate(str.maketrans(
+        'abcdefghijklmnopqrstuvwxyz',
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+    ))
+
+
+@app.get('/search-epd')
+def search_epd():
+    entered = request.args.get('epd_number', '')
+    wanted = normalise_epd_number(entered)
+
+    if not wanted or wanted == '-':
+        flash('Enter the complete EPD number to search.', 'error')
+        return redirect(url_for('index'))
+
+    matches = [
+        record
+        for record in user_records()
+        if normalise_epd_number(
+            record['result']['data'].get('EPD Number')
+        ) == wanted
+    ]
+
+    if not matches:
+        flash(
+            f'No saved record was found for EPD number "{entered}".',
+            'error',
+        )
+        return redirect(url_for('index'))
+
+    if len(matches) > 1:
+        flash(
+            'Multiple older records have this EPD number. '
+            'The first matching record has been opened. '
+            'Use the saved-record selector to inspect the others.',
+            'error',
+        )
+
+    return redirect(url_for(
+        'index',
+        record=matches[0]['id'],
+        _anchor='review-results',
+    ))
 @app.post('/upload')
 def upload():
     visit = load_visit(request.form.get('visit_token', ''))
@@ -522,6 +777,9 @@ def upload():
 
                 result['data']['Material Category'] = category
                 result['_visit'] = dict(visit)
+                result['_pdf_sha256'] = hashlib.sha256(
+                    content
+                ).hexdigest()
 
                 new_record_id = uuid.uuid4().hex
                 insert_record({
@@ -532,7 +790,11 @@ def upload():
                     'result': result,
                 })
                 last_saved_id = new_record_id
-                message = f'Processed and saved {name}.'
+                message = (
+                    f'Processed {name} and stored it for review. '
+                    'Complete all fields and click Save edits '
+                    'before downloading.'
+                )
                 if result.get('ai_failed'):
                     message += ' Gemini failed; Python results retained.'
                 flash(message)
@@ -554,29 +816,70 @@ def edit(record_id):
     if record is None:
         abort(404)
 
-    result = record['result']
-    category_index = next(
-        i for i, (_, key) in enumerate(excel_fields())
-        if key == 'Material Category'
-    )
-    selected_category = request.form.get(f'f_{category_index}', '')
+    fields = excel_fields()
 
-    if selected_category not in CATEGORIES:
-        flash(
-            'Please select a valid material category. No changes were saved.',
-            'error',
+    submitted = {
+        key: request.form.get(f'f_{i}', '').strip()
+        for i, (_, key) in enumerate(fields)
+    }
+
+    empty_labels = [
+        label
+        for label, key in fields
+        if submitted[key] == ''
+    ]
+
+    errors = []
+    epd_number = submitted.get('EPD Number', '').strip()
+
+    if not epd_number or epd_number == '-':
+        errors.append(
+            'Enter the actual EPD Number. '
+            'A blank or - cannot identify the document.'
         )
-        return redirect(url_for('index'))
+
+    if empty_labels:
+        errors.append(
+            f'{len(empty_labels)} fields are empty. '
+            'Enter a value, or - where information is unavailable.'
+        )
+
+    if submitted['Material Category'] not in CATEGORIES:
+        errors.append('Please select a valid material category.')
+
+    if errors:
+        # Display submitted values without saving them.
+        record['result']['data'] = {
+            **record['result']['data'],
+            **submitted,
+        }
+
+        for message in errors:
+            flash(message + ' No changes were saved.', 'error')
+
+        return render_template_string(
+            PAGE,
+            records=user_records(),
+            record=record,
+            selected_id=record_id,
+            ai_ready=bool(API_KEY),
+            categories=CATEGORIES,
+            review_fields=fields,
+            filled_columns=filled_count(record['result']['data']),
+            total_columns=len(HEADERS),
+        ), 422
+
+    result = record['result']
 
     numeric_fields = {
         HEADERS[j]
         for j in (15, 17, 19, 21, 40, 41, 42, 43, 110)
     }
 
-    for i, (_, key) in enumerate(excel_fields()):
-        val = request.form.get(f'f_{i}', '').strip()
+    for _, key in fields:
+        val = submitted[key]
 
-        if val and (key.startswith('__') or key in numeric_fields):
+        if key.startswith('__') or key in numeric_fields:
             try:
                 number = float(val)
                 if math.isfinite(number):
@@ -596,10 +899,26 @@ def edit(record_id):
             result['data'][key] = val
 
     result['reviewed'] = True
-    update_record(record_id, result)
-    flash('Record saved to the database.')
-    return redirect(url_for('index', record=record_id))
 
+    try:
+        update_record(record_id, result)
+    except DuplicateRecordError as exc:
+        flash(str(exc), 'error')
+
+        return render_template_string(
+            PAGE,
+            records=user_records(),
+            record=record,
+            selected_id=record_id,
+            ai_ready=bool(API_KEY),
+            categories=CATEGORIES,
+            review_fields=fields,
+            filled_columns=filled_count(result['data']),
+            total_columns=len(HEADERS),
+        ), 422
+
+    flash('Record saved to the database.')
+    return redirect(url_for('index'))
 
 @app.post('/remove/<record_id>')
 def remove(record_id):

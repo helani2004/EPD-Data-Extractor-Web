@@ -5,7 +5,7 @@ from copy import copy
 from datetime import datetime, timedelta, timezone
 
 from openpyxl.utils import get_column_letter
-from record_fields import excel_values
+from record_fields import excel_values, excel_fields
 from openpyxl import load_workbook
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 
@@ -108,7 +108,29 @@ def save_category_excel(records, destination):
     """Create exactly 64 sheets using the existing Excel template."""
     if len(CATEGORIES) != 63 or len(set(CATEGORIES)) != 63:
         raise ValueError("The category list must contain 63 unique items.")
+    # Require complete records before exporting.
+    for record in records:
+        data = record['result']['data']
 
+        missing = [
+            label
+            for label, key in excel_fields()
+            if data.get(key) is None
+            or str(data.get(key)).strip() == ''
+        ]
+
+        epd = str(data.get('EPD Number') or '').strip()
+
+        if missing or epd in ('', '-'):
+            name = record['result'].get('file') or record['id']
+
+            raise ValueError(
+                f'Cannot download: {name} needs review '
+                f'({len(missing)} empty fields). '
+                'Fill every field or enter - if unavailable, '
+                'and provide the actual EPD Number. '
+                'Then save edits.'
+            )
     # Check categories before creating the workbook.
     for record in records:
         category = record["result"]["data"].get(
