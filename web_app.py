@@ -19,6 +19,7 @@ from ai_review import review_pdf
 from category_export import save_category_excel
 from material_categories import CATEGORIES
 from record_fields import excel_fields, filled_count
+from database_browser import register_database_browser
 from database import (
     list_records,
     get_record,
@@ -37,6 +38,7 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = os.environ.get('RENDER', '').lower() == 'true'
 API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
 MODEL = os.environ.get('EPD_GEMINI_MODEL', 'gemini-flash-latest').strip()
+register_database_browser(app, CATEGORIES)
 
 
 PAGE = '''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -139,6 +141,12 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 <small>Processing can take several minutes. Please keep this tab open.</small></div></form></section>
 <section class="panel">
     <h2>Search saved EPD</h2>
+    <p>
+        <a class="btn secondary"
+           href="{{ url_for('browse_database') }}">
+            Browse database
+        </a>
+    </p>
 
     <form method="get"
           action="{{ url_for('search_epd') }}"
@@ -223,7 +231,13 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
 </tr>
 {% endfor %}
 </tbody></table></div><div class="actions"><button type="submit">Save edits</button></div></form>
-<form method="post" action="{{ url_for('remove',record_id=record['id']) }}" class="actions"><button class="danger" type="submit" onclick="return confirm('Remove this record?')">Remove selected record</button></form>
+<p>
+    <a class="btn danger"
+       href="{{ url_for('confirm_database_delete',
+                        record_id=record['id']) }}">
+        Delete selected entry
+    </a>
+</p>
 <details><summary>Extraction warnings ({{ record['result'].get('warnings',[])|length }})</summary>{% for w in record['result'].get('warnings',[]) %}<div class="warning">{{ w }}</div>{% endfor %}</details>
 <details><summary>Source evidence ({{ record['result'].get('evidence',[])|length }})</summary><div class="scroll"><table><tr><th>Field</th><th>Value</th><th>Page</th><th>Source text</th></tr>{% for e in record['result'].get('evidence',[]) %}<tr><td>{{ e.get('field','') }}</td><td>{{ e.get('value','') }}</td><td>{{ e.get('page','') }}</td><td>{{ e.get('raw','') }}</td></tr>{% endfor %}</table></div></details>
 <details><summary>Gemini AI review ({{ record['result'].get('ai_review',[])|length }})</summary><div class="scroll"><table><tr><th>Field</th><th>AI proposal</th><th>Decision</th><th>Page</th></tr>{% for e in record['result'].get('ai_review',[]) %}<tr><td>{{ e.get('field','') }}</td><td>{{ e.get('proposed','') }}</td><td>{{ e.get('decision','') }}</td><td>{{ e.get('page','') }}</td></tr>{% endfor %}</table></div></details>
