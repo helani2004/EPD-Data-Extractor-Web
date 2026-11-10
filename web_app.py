@@ -790,7 +790,11 @@ def upload():
                     'result': result,
                 })
                 last_saved_id = new_record_id
-                message = f'Processed and saved {name}.'
+                message = (
+                    f'Processed {name} and stored it for review. '
+                    'Complete all fields and click Save edits '
+                    'before downloading.'
+                )
                 if result.get('ai_failed'):
                     message += ' Gemini failed; Python results retained.'
                 flash(message)
