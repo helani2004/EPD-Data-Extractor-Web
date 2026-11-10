@@ -2,6 +2,7 @@
 import os
 import io
 import math
+import hashlib
 import time
 import uuid
 import tempfile
@@ -25,6 +26,7 @@ from database import (
     update_record,
     delete_record,
     DatabaseError,
+    DuplicateRecordError,
 )
 
 app = Flask(__name__)
@@ -690,6 +692,9 @@ def upload():
 
                 result['data']['Material Category'] = category
                 result['_visit'] = dict(visit)
+                result['_pdf_sha256'] = hashlib.sha256(
+                    content
+                ).hexdigest()
 
                 new_record_id = uuid.uuid4().hex
                 insert_record({
@@ -736,6 +741,13 @@ def edit(record_id):
     ]
 
     errors = []
+    epd_number = submitted.get('EPD Number', '').strip()
+
+    if not epd_number or epd_number == '-':
+        errors.append(
+            'Enter the actual EPD Number. '
+            'A blank or - cannot identify the document.'
+        )
 
     if empty_labels:
         errors.append(
@@ -798,7 +810,24 @@ def edit(record_id):
             result['data'][key] = val
 
     result['reviewed'] = True
-    update_record(record_id, result)
+
+    try:
+        update_record(record_id, result)
+    except DuplicateRecordError as exc:
+        flash(str(exc), 'error')
+
+        return render_template_string(
+            PAGE,
+            records=user_records(),
+            record=record,
+            selected_id=record_id,
+            ai_ready=bool(API_KEY),
+            categories=CATEGORIES,
+            review_fields=fields,
+            filled_columns=filled_count(result['data']),
+            total_columns=len(HEADERS),
+        ), 422
+
     flash('Record saved to the database.')
     return redirect(url_for('index', record=record_id))
 
