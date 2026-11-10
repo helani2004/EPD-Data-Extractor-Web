@@ -148,7 +148,22 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
     Edit any field and click <strong>Save edits</strong> before downloading.
     Blank fields mean unavailable or not recovered.
 </p>
-<form method="post" action="{{ url_for('edit',record_id=record['id']) }}"><div class="scroll"><table><thead><tr><th>Excel field</th><th>Extracted value (editable)</th></tr></thead><tbody>
+<form id="review-form" method="post"
+      action="{{ url_for('edit',record_id=record['id']) }}">
+
+<div class="actions" role="toolbar" aria-label="Review editing tools">
+    <button id="undo-edit" type="button" class="secondary"
+            title="Undo" disabled>
+        ↶ Undo
+    </button>
+    <button id="redo-edit" type="button" class="secondary"
+            title="Redo" disabled>
+        ↷ Redo
+    </button>
+    <span class="status">Changes are saved when you click Save edits.</span>
+</div>
+
+<div class="scroll"><table><thead><tr><th>Excel field</th><th>Extracted value (editable)</th></tr></thead><tbody>
 {% for label,key in review_fields %}
 {% set value = record['result']['data'].get(key, '') %}
 <tr>
@@ -361,6 +376,97 @@ h2{font-size:19px;margin:0 0 15px}label{font-weight:600}input[type=file],input[t
     });
 
     prepareVisit();
+})();
+</script>
+
+<script>
+(() => {
+    const form = document.getElementById('review-form');
+    if (!form) return;
+
+    const undoButton = document.getElementById('undo-edit');
+    const redoButton = document.getElementById('redo-edit');
+
+    const fields = Array.from(form.querySelectorAll(
+        'input[name], textarea[name], select[name]'
+    )).filter(field => ![
+        'hidden', 'submit', 'button'
+    ].includes(field.type));
+
+    const readValues = () => fields.map(field => field.value);
+
+    let history = [readValues()];
+    let position = 0;
+    let restoring = false;
+
+    function updateButtons() {
+        undoButton.disabled = position === 0;
+        redoButton.disabled = position === history.length - 1;
+    }
+
+    function rememberChange(event) {
+        if (restoring || !fields.includes(event.target)) return;
+        if (event.isComposing) return;
+
+        const values = readValues();
+        const previous = history[position];
+
+        if (values.every((value, index) => value === previous[index])) {
+            return;
+        }
+
+        // A new edit after Undo replaces the previous Redo history.
+        history = history.slice(0, position + 1);
+        history.push(values);
+
+        // Bound the amount of history kept in this page.
+        if (history.length > 201) {
+            history.shift();
+        }
+
+        position = history.length - 1;
+        updateButtons();
+    }
+
+    function restore(nextPosition) {
+        if (nextPosition < 0 || nextPosition >= history.length) return;
+
+        restoring = true;
+        position = nextPosition;
+
+        fields.forEach((field, index) => {
+            field.value = history[position][index];
+            field.dispatchEvent(new Event('input', { bubbles: true }));
+            field.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+
+        restoring = false;
+        updateButtons();
+    }
+
+    form.addEventListener('input', rememberChange);
+    form.addEventListener('change', rememberChange);
+    form.addEventListener('compositionend', rememberChange);
+
+    undoButton.addEventListener('click', () => restore(position - 1));
+    redoButton.addEventListener('click', () => restore(position + 1));
+
+    form.addEventListener('keydown', event => {
+        if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+        if (!fields.includes(event.target)) return;
+
+        const key = event.key.toLowerCase();
+
+        if (key === 'z') {
+            event.preventDefault();
+            restore(position + (event.shiftKey ? 1 : -1));
+        } else if (key === 'y') {
+            event.preventDefault();
+            restore(position + 1);
+        }
+    });
+
+    updateButtons();
 })();
 </script>
 
